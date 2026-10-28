@@ -38,11 +38,36 @@ func pingWindowFilter(from, to time.Time) bson.D {
 	}
 }
 
+// legacyPingFilter selects the ping bodies stored before receivedAt existed
+// (pre-upgrade data). The events ping partial index holds them under a null
+// key, so the read is index-backed and empty once they are drained.
+func legacyPingFilter() bson.D {
+	return bson.D{
+		{Key: "types", Value: events.VerificationEventUri},
+		{Key: "receivedAt", Value: bson.D{{Key: "$exists", Value: false}}},
+	}
+}
+
+// legacyPingWindowFilter selects the ping bodies without receivedAt whose
+// ObjectId _id time is in [from, to). An ObjectId built from a time sorts
+// before every _id of that second, so consecutive windows neither overlap nor
+// leave a gap. The planner serves it from the _id index (an _id range) or the
+// events ping partial index (the null receivedAt key), whichever it rates
+// cheaper; never a collection scan.
+func legacyPingWindowFilter(from, to time.Time) bson.D {
+	return append(legacyPingFilter(), bson.E{Key: "_id", Value: bson.D{
+		{Key: "$gte", Value: bson.NewObjectIDFromTimestamp(from)},
+		{Key: "$lt", Value: bson.NewObjectIDFromTimestamp(to)},
+	}})
+}
+
 // PurgePingWindow deletes delivered ping-marked rows with createdAt < to (one
 // deleteMany on the ping partial index), then reads the ping bodies stored in
-// [from, to) in batches and deletes each one whose reference key (originalJti
-// when set, else jti) has no pending deliveries row (ADR 0048, ADR 0055
-// A5.22). Bodies without receivedAt and unmarked rows are not matched.
+// [from, to) in batches — by receivedAt, then, while any pre-upgrade ping body
+// is left, by its ObjectId _id time — and deletes each one whose reference key
+// (originalJti when set, else jti) has no pending deliveries row (ADR 0048,
+// ADR 0055 A5.22). Unmarked rows are not matched until MigratePingMarkers
+// marks them.
 func (d *EventDAOMongo) PurgePingWindow(ctx context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
 	var result interfaces.PingPurgeResult
 	dc, err := d.deliveriesColLoad()
@@ -66,12 +91,35 @@ func (d *EventDAOMongo) PurgePingWindow(ctx context.Context, from, to time.Time)
 	}
 	result.Deliveries = res.DeletedCount
 
-	cursor, err := ec.Find(ctx, pingWindowFilter(from, to), options.Find().
+	n, err := purgePingBodies(ctx, ec, dc, pingWindowFilter(from, to))
+	result.Bodies += n
+	if err != nil {
+		return result, err
+	}
+	// The pre-upgrade pass runs only while a body without receivedAt is left
+	// (one indexed probe), so a drained store pays nothing for it.
+	if err = ec.FindOne(ctx, legacyPingFilter(), options.FindOne().
+		SetProjection(bson.D{{Key: "_id", Value: 1}})).Err(); errors.Is(err, mongo.ErrNoDocuments) {
+		return result, nil
+	} else if err != nil {
+		eLog.Warn("Error reading pre-upgrade ping bodies for purge", "error", err)
+		return result, err
+	}
+	n, err = purgePingBodies(ctx, ec, dc, legacyPingWindowFilter(from, to))
+	result.Bodies += n
+	return result, err
+}
+
+// purgePingBodies reads the ping bodies filter selects in batches and deletes
+// the unpending ones; it returns the count deleted.
+func purgePingBodies(ctx context.Context, ec, dc *mongo.Collection, filter bson.D) (int64, error) {
+	var deleted int64
+	cursor, err := ec.Find(ctx, filter, options.Find().
 		SetProjection(bson.D{{Key: "jti", Value: 1}, {Key: "originalJti", Value: 1}}).
 		SetBatchSize(pingPurgeBatch))
 	if err != nil {
 		eLog.Warn("Error reading ping bodies for purge", "error", err)
-		return result, err
+		return 0, err
 	}
 	defer func() { _ = cursor.Close(ctx) }()
 
@@ -81,27 +129,27 @@ func (d *EventDAOMongo) PurgePingWindow(ctx context.Context, from, to time.Time)
 			return nil
 		}
 		n, err := deleteUnpendingBodies(ctx, ec, dc, batch)
-		result.Bodies += n
+		deleted += n
 		batch = batch[:0]
 		return err
 	}
 	for cursor.Next(ctx) {
 		var b sweepBody
 		if err = cursor.Decode(&b); err != nil {
-			return result, err
+			return deleted, err
 		}
 		batch = append(batch, b)
 		if len(batch) == pingPurgeBatch {
 			if err = flush(); err != nil {
-				return result, err
+				return deleted, err
 			}
 		}
 	}
 	if err = cursor.Err(); err != nil {
 		eLog.Warn("Error reading ping bodies for purge", "error", err)
-		return result, err
+		return deleted, err
 	}
-	return result, flush()
+	return deleted, flush()
 }
 
 // deleteUnpendingBodies deletes the bodies of batch that no pending row
@@ -150,8 +198,10 @@ func deleteUnpendingBodies(ctx context.Context, ec, dc *mongo.Collection, batch 
 	return del.DeletedCount, nil
 }
 
-// OldestPingStoredAt returns the smallest receivedAt among ping bodies (one
-// indexed read).
+// OldestPingStoredAt returns the oldest stored-at time among ping bodies: the
+// smallest receivedAt (one indexed read) or, when earlier, the smallest _id
+// time of a pre-upgrade ping body (an indexed read of the null receivedAt key,
+// empty once they are drained).
 func (d *EventDAOMongo) OldestPingStoredAt(ctx context.Context) (time.Time, bool, error) {
 	ec, err := d.eventColLoad()
 	if err != nil {
@@ -160,18 +210,40 @@ func (d *EventDAOMongo) OldestPingStoredAt(ctx context.Context) (time.Time, bool
 	var body struct {
 		ReceivedAt time.Time `bson:"receivedAt"`
 	}
+	var oldest time.Time
+	found := false
 	err = ec.FindOne(ctx, bson.D{
 		{Key: "types", Value: events.VerificationEventUri},
 		{Key: "receivedAt", Value: bson.D{{Key: "$exists", Value: true}}},
 	}, options.FindOne().
 		SetSort(bson.D{{Key: "receivedAt", Value: 1}}).
 		SetProjection(bson.D{{Key: "receivedAt", Value: 1}})).Decode(&body)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, mongo.ErrNoDocuments):
+	case err != nil:
 		eLog.Warn("Error reading oldest ping body", "error", err)
 		return time.Time{}, false, err
+	default:
+		oldest, found = body.ReceivedAt, true
 	}
-	return body.ReceivedAt, true, nil
+
+	var legacy struct {
+		ID bson.RawValue `bson:"_id"`
+	}
+	err = ec.FindOne(ctx, legacyPingFilter(), options.FindOne().
+		SetSort(bson.D{{Key: "_id", Value: 1}}).
+		SetProjection(bson.D{{Key: "_id", Value: 1}})).Decode(&legacy)
+	switch {
+	case errors.Is(err, mongo.ErrNoDocuments):
+	case err != nil:
+		eLog.Warn("Error reading oldest pre-upgrade ping body", "error", err)
+		return time.Time{}, false, err
+	default:
+		if oid, ok := legacy.ID.ObjectIDOK(); ok {
+			if at := oid.Timestamp().UTC(); !found || at.Before(oldest) {
+				oldest, found = at, true
+			}
+		}
+	}
+	return oldest, found, nil
 }

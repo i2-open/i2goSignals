@@ -71,24 +71,59 @@ func migrateUntilStoreReady(ctx context.Context, es *services.EventService, coor
 // not connected yet returns an error wrapping interfaces.ErrStoreNotReady
 // without waiting; migrateUntilStoreReady retries it.
 func migrateLegacyDeliveries(ctx context.Context, es *services.EventService, coord cluster.ClusterCoordinator, nodeId string, expireAt func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	var res interfaces.MigrationResult
+	err := underMigrationLease(ctx, coord, migrationLeaseResource, "deliveries", nodeId, func() error {
+		var err error
+		res, err = es.MigrateLegacyDeliveries(ctx, expireAt)
+		return err
+	})
+	return res, err
+}
+
+// pingMarkerLeaseResource is the coordinator lease the one-shot ping-marker
+// backfill runs under (ADR 0048, i2goSignals #389). Like
+// migrationLeaseResource it is none of the stream lease kinds.
+const pingMarkerLeaseResource = "migration:ping-marker"
+
+// migratePingMarkers runs EventService.MigratePingMarkers under
+// pingMarkerLeaseResource, as migrateLegacyDeliveries does its migration: a
+// node refused the lease waits for it and then finds the done flag recorded,
+// so one node of a racing cluster does the work.
+func migratePingMarkers(ctx context.Context, es *services.EventService, coord cluster.ClusterCoordinator, nodeId string) (interfaces.PingMarkerResult, error) {
+	var res interfaces.PingMarkerResult
+	err := underMigrationLease(ctx, coord, pingMarkerLeaseResource, "ping-marker", nodeId, func() error {
+		var err error
+		res, err = es.MigratePingMarkers(ctx)
+		return err
+	})
+	return res, err
+}
+
+// underMigrationLease runs run while holding resource: it waits for the lease
+// (retrying every migrationLeaseRetry, logging at INFO every
+// migrationWaitLogEvery), renews it every migrationLeaseRenew while run runs
+// and releases it afterwards, also on failure. A nil coordinator runs run
+// directly; a store that is not connected returns ErrStoreNotReady without
+// waiting; ctx ending while waiting returns ctx.Err().
+func underMigrationLease(ctx context.Context, coord cluster.ClusterCoordinator, resource, name, nodeId string, run func() error) error {
 	if coord == nil {
-		return es.MigrateLegacyDeliveries(ctx, expireAt)
+		return run()
 	}
 	var lastLog time.Time
 	for {
-		held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, nodeId, migrationLeaseTTL)
+		held, _, _, err := coord.TryAcquireOrRenewLease(resource, nodeId, migrationLeaseTTL)
 		if err == nil && held {
 			break
 		}
 		if errors.Is(err, interfaces.ErrStoreNotReady) {
-			return interfaces.MigrationResult{}, err
+			return err
 		}
 		if now := time.Now(); now.Sub(lastLog) >= migrationWaitLogEvery {
 			lastLog = now
-			eventLogger.Info("ROUTER: waiting for the deliveries migration lease", "resource", migrationLeaseResource, "node", nodeId, "error", err)
+			eventLogger.Info("ROUTER: waiting for the "+name+" migration lease", "resource", resource, "node", nodeId, "error", err)
 		}
 		if !SleepCtx(ctx, migrationLeaseRetry) {
-			return interfaces.MigrationResult{}, ctx.Err()
+			return ctx.Err()
 		}
 	}
 
@@ -103,18 +138,18 @@ func migrateLegacyDeliveries(ctx context.Context, es *services.EventService, coo
 			case <-renewCtx.Done():
 				return
 			case <-t.C:
-				if held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, nodeId, migrationLeaseTTL); err != nil || !held {
-					eventLogger.Warn("ROUTER: deliveries migration lease renewal failed", "resource", migrationLeaseResource, "node", nodeId, "held", held, "error", err)
+				if held, _, _, err := coord.TryAcquireOrRenewLease(resource, nodeId, migrationLeaseTTL); err != nil || !held {
+					eventLogger.Warn("ROUTER: "+name+" migration lease renewal failed", "resource", resource, "node", nodeId, "held", held, "error", err)
 				}
 			}
 		}
 	}()
 
-	res, err := es.MigrateLegacyDeliveries(ctx, expireAt)
+	err := run()
 	stopRenew()
 	<-renewDone
-	if rerr := coord.ReleaseLeaseIfOwned(migrationLeaseResource, nodeId); rerr != nil {
-		eventLogger.Warn("ROUTER: deliveries migration lease release failed", "resource", migrationLeaseResource, "node", nodeId, "error", rerr)
+	if rerr := coord.ReleaseLeaseIfOwned(resource, nodeId); rerr != nil {
+		eventLogger.Warn("ROUTER: "+name+" migration lease release failed", "resource", resource, "node", nodeId, "error", rerr)
 	}
-	return res, err
+	return err
 }

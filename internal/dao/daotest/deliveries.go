@@ -39,6 +39,8 @@ func Deliveries(t *testing.T, newDAO func(t *testing.T) interfaces.EventDAO) {
 		{"OldestPingStoredAt", oldestPingStoredAt},
 		{"ReceivedAtStamped", receivedAtStamped},
 		{"PingMarkerEveryWritePath", pingMarkerEveryWritePath},
+		{"PreUpgradePingPurgedByStoredAt", preUpgradePingPurgedByStoredAt},
+		{"OldestPingStoredAtPreUpgradeFallback", oldestPingStoredAtPreUpgrade},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newDAO(t)) })

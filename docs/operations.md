@@ -457,6 +457,35 @@ received from a peer. Pings are diagnostic, so they are not kept forever.
   long delete or a replication-lag burst. A node that loses the lease or shuts
   down stops between windows and records nothing; the next run picks up from
   the oldest ping left.
+- **The first run after the upgrade drains the backlog.** A server that has
+  been storing pings since before this release has every one of them waiting.
+  The first run starts at the oldest ping and works forward one hour of stored
+  time per window, with the one-second pause between windows, so a backlog of
+  N hours takes at least N seconds of pauses on top of the deletes. A run that
+  stops (shutdown, lost lease) is not recorded, so the next check (every 15
+  minutes, or 5 minutes after a restart) resumes from the oldest ping left. Expect the `INFO` summary of the
+  first runs to report many windows and large counts; later runs report about
+  six windows.
+- **Pings stored before the upgrade.** Their bodies carry no stored-at time,
+  so the purge dates them by when they were inserted: the MongoDB ObjectId
+  `_id` time (memory store: the event's sort time). Their delivery records
+  carry no ping marker either. At startup, right after the
+  `pendingEvents`/`deliveredEvents` migration, one node (lease
+  `migration:ping-marker`) runs a one-shot backfill that marks the delivery
+  records of those pre-upgrade pings, in batches of 1000, and records a done
+  flag in the `migrations` collection; every later start finds the flag and
+  does nothing. A backfill that fails logs a `WARN`, does not stop the server,
+  and runs again at the next start. It logs
+  `ping delivery markers backfilled marked=<n>` when it marked anything. The
+  memory store derives the marker from the body when it loads its files.
+- **Index builds at the first start.** The release adds two partial indexes:
+  `{ping:1, state:1, createdAt:1}` on `deliveries` (ping records only) and
+  `{receivedAt:1}` on `events` (pings only). The server builds them at
+  startup, as it does every index. On a large store the first build reads the
+  whole collection once and takes time and I/O on the primary; build them in
+  a maintenance window beforehand (same keys and partial filters) to keep that
+  off the upgrade. The fallback query for pre-upgrade bodies uses the `_id`
+  index or the `events` ping index, never a collection scan.
 - **Turning it off.** `I2SIG_PING_RETENTION=0`. An unparseable or negative
   value logs a `WARN` and uses `24h`.
 - **What it logs.** At startup, beside the event-retention posture line:
@@ -474,9 +503,10 @@ received from a peer. Pings are diagnostic, so they are not kept forever.
 
     A failed window or a lost lease logs a `WARN` and leaves the purge
     unrecorded, so the next check retries. There are no metrics.
-- **Disk space is not returned.** MongoDB keeps the space freed by deletes
-  inside the collection files and reuses it for new writes. The server never
-  runs `compact`. To return the space to the volume after a large purge, run
+- **Disk space is not returned; `compact` is an operator action.** MongoDB
+  keeps the space freed by deletes inside the collection files and reuses it
+  for new writes, so the files do not shrink after the first-run drain. The
+  purge never runs `compact`, and neither does anything else in the server. To return the space to the volume after a large purge, run
   `compact` on `events` and `deliveries` yourself, one replica-set member at a
   time, in a maintenance window (see the MongoDB `compact` documentation for
   its locking on your server version).

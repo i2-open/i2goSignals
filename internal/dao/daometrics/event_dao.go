@@ -285,6 +285,13 @@ func (d *eventDAO) PurgePingWindow(ctx context.Context, from, to time.Time) (int
 	return res, err
 }
 
+func (d *eventDAO) MigratePingMarkers(ctx context.Context) (interfaces.PingMarkerResult, error) {
+	start := time.Now()
+	res, err := d.inner.MigratePingMarkers(ctx)
+	d.observe("MigratePingMarkers", start, err)
+	return res, err
+}
+
 func (d *eventDAO) OldestPingStoredAt(ctx context.Context) (time.Time, bool, error) {
 	start := time.Now()
 	at, ok, err := d.inner.OldestPingStoredAt(ctx)

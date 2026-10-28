@@ -200,3 +200,81 @@ func pingMarkerEveryWritePath(t *testing.T, d interfaces.EventDAO) {
 		}
 	}
 }
+
+// PreUpgradeSeeder is implemented, in an adapter's test files, by a DAO that
+// can store a body the way a release before ADR 0048 did: with no receivedAt,
+// stored at storedAt by the adapter's own stored-at fallback (the ObjectId
+// `_id` time in Mongo, SortTime in memory). storedAt must be whole seconds.
+// The pre-upgrade cases (#389) skip on a DAO that does not implement it.
+type PreUpgradeSeeder interface {
+	SeedPreUpgradeBody(t *testing.T, rec *model.EventRecord, storedAt time.Time)
+}
+
+func preUpgradeSeeder(t *testing.T, d interfaces.EventDAO) PreUpgradeSeeder {
+	t.Helper()
+	s, ok := d.(PreUpgradeSeeder)
+	if !ok {
+		t.Skipf("%T cannot seed pre-upgrade bodies", d)
+	}
+	return s
+}
+
+// preUpgradePingPurgedByStoredAt (#389): a ping body with no receivedAt is
+// purged by its stored-at fallback once older than the cutoff; a younger one
+// stays; one still pending on a stream stays with its pending row; a
+// pre-upgrade data body of the same age is untouched.
+func preUpgradePingPurgedByStoredAt(t *testing.T, d interfaces.EventDAO) {
+	seed := preUpgradeSeeder(t, d)
+	now := time.Now().UTC().Truncate(time.Second)
+	old, cutoff, young := now.Add(-48*time.Hour), now.Add(-24*time.Hour), now.Add(-time.Hour)
+	sid := ids.NewObjectID()
+
+	pre := func(rec *model.EventRecord) *model.EventRecord {
+		rec.ReceivedAt = time.Time{}
+		return rec
+	}
+	seed.SeedPreUpgradeBody(t, pre(pingRecord("pre-old", old)), old)
+	seed.SeedPreUpgradeBody(t, pre(pingRecord("pre-young", young)), young)
+	seed.SeedPreUpgradeBody(t, pre(pingRecord("pre-pending", old)), old)
+	addPending(t, d, sid, interfaces.PendingRef{Jti: "pre-pending", AckJti: "pre-pending", EnqueuedAt: old})
+	seed.SeedPreUpgradeBody(t, pre(dataRecord("pre-data", old)), old)
+
+	res := purgePings(t, d, old.Add(-time.Hour), cutoff)
+	if res.Bodies != 1 {
+		t.Errorf("PurgePingWindow = %+v, want 1 body (pre-old)", res)
+	}
+	for jti, want := range map[string]bool{"pre-old": false, "pre-young": true, "pre-pending": true, "pre-data": true} {
+		if got := hasBody(t, d, jti); got != want {
+			t.Errorf("body %s stored = %v, want %v", jti, got, want)
+		}
+	}
+	if _, ok := pendingRef(t, d, sid, "pre-pending"); !ok {
+		t.Error("pending row pre-pending was purged")
+	}
+	// The window just before is empty: nothing older than the oldest body.
+	if res := purgePings(t, d, old.Add(-2*time.Hour), old.Add(-time.Hour)); res.Bodies != 0 {
+		t.Errorf("empty window purged %+v", res)
+	}
+}
+
+// oldestPingStoredAtPreUpgrade (#389): the oldest ping is the minimum over
+// stamped bodies' receivedAt and pre-upgrade bodies' stored-at fallback.
+func oldestPingStoredAtPreUpgrade(t *testing.T, d interfaces.EventDAO) {
+	seed := preUpgradeSeeder(t, d)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	insertRec(t, d, pingRecord("stamped", now.Add(-time.Hour)))
+	seed.SeedPreUpgradeBody(t, dataRecord("pre-data", now.Add(-96*time.Hour)), now.Add(-96*time.Hour))
+	pre := pingRecord("pre", now.Add(-48*time.Hour))
+	pre.ReceivedAt = time.Time{}
+	seed.SeedPreUpgradeBody(t, pre, now.Add(-48*time.Hour))
+	at, ok, err := d.OldestPingStoredAt(ctx)
+	if err != nil || !ok || !at.Equal(now.Add(-48*time.Hour)) {
+		t.Fatalf("OldestPingStoredAt = (%v, %v, %v), want the pre-upgrade %v", at, ok, err, now.Add(-48*time.Hour))
+	}
+	insertRec(t, d, pingRecord("stamped-older", now.Add(-72*time.Hour)))
+	at, ok, err = d.OldestPingStoredAt(ctx)
+	if err != nil || !ok || !at.Equal(now.Add(-72*time.Hour)) {
+		t.Fatalf("OldestPingStoredAt = (%v, %v, %v), want the stamped %v", at, ok, err, now.Add(-72*time.Hour))
+	}
+}

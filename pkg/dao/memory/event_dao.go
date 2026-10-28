@@ -643,10 +643,19 @@ func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCuto
 	return result, nil
 }
 
+// storedAt is a body's stored-at time for the ping purge: ReceivedAt, else
+// (a body stored before ReceivedAt existed) SortTime (ADR 0048).
+func storedAt(rec *model.EventRecord) time.Time {
+	if !rec.ReceivedAt.IsZero() {
+		return rec.ReceivedAt
+	}
+	return rec.SortTime
+}
+
 // PurgePingWindow deletes delivered ping-marked rows with createdAt < to, then
-// every ping body with receivedAt in [from, to) whose reference key
-// (OriginalJti when set, else Jti) has no pending row (ADR 0048). Bodies with
-// no receivedAt and unmarked rows are left alone.
+// every ping body stored (storedAt) in [from, to) whose reference key
+// (OriginalJti when set, else Jti) has no pending row (ADR 0048). Unmarked
+// rows are left alone.
 func (d *EventDAOMemory) PurgePingWindow(_ context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -666,8 +675,10 @@ func (d *EventDAOMemory) PurgePingWindow(_ context.Context, from, to time.Time) 
 		}
 	}
 	for jti, rec := range d.events {
-		if !interfaces.IsPing(rec.Types) || rec.ReceivedAt.IsZero() ||
-			rec.ReceivedAt.Before(from) || !rec.ReceivedAt.Before(to) {
+		if !interfaces.IsPing(rec.Types) {
+			continue
+		}
+		if at := storedAt(rec); at.IsZero() || at.Before(from) || !at.Before(to) {
 			continue
 		}
 		key := rec.Jti
@@ -686,18 +697,20 @@ func (d *EventDAOMemory) PurgePingWindow(_ context.Context, from, to time.Time) 
 	return result, nil
 }
 
-// OldestPingStoredAt returns the earliest receivedAt among ping bodies.
+// OldestPingStoredAt returns the earliest stored-at time (storedAt) among
+// ping bodies.
 func (d *EventDAOMemory) OldestPingStoredAt(_ context.Context) (time.Time, bool, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	var oldest time.Time
 	found := false
 	for _, rec := range d.events {
-		if !interfaces.IsPing(rec.Types) || rec.ReceivedAt.IsZero() {
+		at := storedAt(rec)
+		if !interfaces.IsPing(rec.Types) || at.IsZero() {
 			continue
 		}
-		if !found || rec.ReceivedAt.Before(oldest) {
-			oldest, found = rec.ReceivedAt, true
+		if !found || at.Before(oldest) {
+			oldest, found = at, true
 		}
 	}
 	return oldest, found, nil
@@ -707,6 +720,12 @@ func (d *EventDAOMemory) OldestPingStoredAt(_ context.Context) (time.Time, bool,
 // already load into the deliveries map, so the old collections are "gone".
 func (d *EventDAOMemory) MigrateLegacyDeliveries(_ context.Context, _ func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
 	return interfaces.MigrationResult{Dropped: true}, nil
+}
+
+// MigratePingMarkers has nothing to backfill in memory: SetState derives the
+// marker from the body for every row it loads from disk.
+func (d *EventDAOMemory) MigratePingMarkers(_ context.Context) (interfaces.PingMarkerResult, error) {
+	return interfaces.PingMarkerResult{AlreadyDone: true}, nil
 }
 
 func (row *delivery) deliverable(streamID string) interfaces.DeliverableEvent {
@@ -866,8 +885,9 @@ func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pendi
 // SetState replaces the store from its persisted shape. A nil argument keeps
 // the current contents of that part (for pending / delivered: the rows in that
 // state). An entry loaded without ackJti gets ackJti = jti, and one without
-// createdAt gets the load time. A JTI listed both pending and delivered for a
-// stream is kept pending (at-least-once).
+// createdAt gets the load time. A loaded row carries the ping marker when its
+// body is a ping (the persisted shape has no marker; ADR 0048). A JTI listed
+// both pending and delivered for a stream is kept pending (at-least-once).
 func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -896,6 +916,9 @@ func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending 
 		}
 		if row.CreatedAt.IsZero() {
 			row.CreatedAt = now
+		}
+		if rec, ok := d.events[row.Jti]; ok {
+			row.Ping = interfaces.IsPing(rec.Types)
 		}
 		return row
 	}

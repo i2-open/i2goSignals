@@ -516,6 +516,10 @@ func (d *notifyingEventDAO) PurgePingWindow(ctx context.Context, from, to time.T
 	return res, nil
 }
 
+func (d *notifyingEventDAO) MigratePingMarkers(ctx context.Context) (interfaces.PingMarkerResult, error) {
+	return d.inner.MigratePingMarkers(ctx)
+}
+
 func (d *notifyingEventDAO) OldestPingStoredAt(ctx context.Context) (time.Time, bool, error) {
 	return d.inner.OldestPingStoredAt(ctx)
 }

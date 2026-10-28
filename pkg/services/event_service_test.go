@@ -154,6 +154,9 @@ func (f *fakeEventDAO) SweepExpired(_ context.Context, _, _ time.Time, _ int) (i
 func (f *fakeEventDAO) PurgePingWindow(_ context.Context, _, _ time.Time) (interfaces.PingPurgeResult, error) {
 	return interfaces.PingPurgeResult{}, nil
 }
+func (f *fakeEventDAO) MigratePingMarkers(_ context.Context) (interfaces.PingMarkerResult, error) {
+	return interfaces.PingMarkerResult{}, nil
+}
 func (f *fakeEventDAO) OldestPingStoredAt(_ context.Context) (time.Time, bool, error) {
 	return time.Time{}, false, nil
 }

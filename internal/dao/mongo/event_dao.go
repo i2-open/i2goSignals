@@ -136,6 +136,11 @@ type EventDAOMongo struct {
 	// deliveredEvents. Only tests sharing one database set them.
 	legacyPending   string
 	legacyDelivered string
+
+	// migrations overrides the collection MigratePingMarkers records its done
+	// flag in; empty means migrationsCollection. Only tests sharing one
+	// database set it.
+	migrations string
 }
 
 type sweepWatermark struct {
