@@ -195,6 +195,34 @@ func TestSyncStreamTable_PurgesStaleClusterRows(t *testing.T) {
 	assert.NotNil(t, current)
 }
 
+// The ping-purge lease is not a stream lease: a stream-table sync after it has
+// been expired longer than the GC window keeps the row and its lastPurgeAt, so
+// the next node still knows when the last purge ran (ADR 0048).
+func TestSyncStreamTable_KeepsPingPurgeLease(t *testing.T) {
+	app := newTableApp(t)
+	coord, ok := app.Coordinator.(*memory_provider.MemoryCoordinator)
+	require.True(t, ok)
+
+	past := time.Now().UTC().Add(-10 * time.Minute)
+	coord.SetClock(func() time.Time { return past })
+	acquired, token, _, err := coord.TryAcquireOrRenewLease(cluster.PingPurgeResource, "node-old", time.Second)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	recorded, err := coord.RecordPingPurge(past, token)
+	require.NoError(t, err)
+	require.True(t, recorded)
+	coord.SetClock(nil)
+
+	app.syncStreamTable()
+	require.Equal(t, 1, app.router.syncCount())
+
+	last, err := coord.LastPingPurge()
+	require.NoError(t, err)
+	assert.True(t, last.Equal(past), "lastPurgeAt = %v, want %v", last, past)
+	_, token, _, _ = coord.TryAcquireOrRenewLease(cluster.PingPurgeResource, "node-now", time.Second)
+	assert.Equal(t, int64(2), token, "the ping-purge row keeps its fencing history")
+}
+
 // #349 review: a stream-changed call from a peer reconciles the receivers too.
 // When the store cannot be read, the reconcile must keep the receivers this
 // node runs — as it keeps the router's streams — rather than read the failed

@@ -505,7 +505,7 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	// (tagged source:reset downstream). A failed re-queue is not re-delivered and
 	// so is not metered.
 	for _, event := range events {
-		ref := interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti, EnqueuedAt: time.Now()}
+		ref := interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti, EnqueuedAt: time.Now(), Ping: interfaces.IsPing(event.Types)}
 		if ackJti != nil {
 			ref.AckJti = ackJti(event.Jti)
 		}

@@ -151,6 +151,12 @@ func (f *fakeEventDAO) ResetPendingAckJti(_ context.Context, _ string) (int64, e
 func (f *fakeEventDAO) SweepExpired(_ context.Context, _, _ time.Time, _ int) (interfaces.SweepResult, error) {
 	return interfaces.SweepResult{}, nil
 }
+func (f *fakeEventDAO) PurgePingWindow(_ context.Context, _, _ time.Time) (interfaces.PingPurgeResult, error) {
+	return interfaces.PingPurgeResult{}, nil
+}
+func (f *fakeEventDAO) OldestPingStoredAt(_ context.Context) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
 func (f *fakeEventDAO) MigrateLegacyDeliveries(_ context.Context, _ func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
 	return interfaces.MigrationResult{}, nil
 }

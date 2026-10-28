@@ -488,6 +488,12 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 		pLog.Error("Error creating sortTime index for eventCol", "error", err)
 		return err
 	}
+	// {receivedAt} partial on ping types: the ping purge's window read and
+	// oldest-ping lookup (ADR 0048).
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongodao.EventsPingReceivedAtIndexModel()); err != nil {
+		pLog.Error("Error creating ping receivedAt index for eventCol", "error", err)
+		return err
+	}
 
 	indexIss := mongo.IndexModel{
 		Keys: bson.M{"iss": 1},
@@ -1033,4 +1039,12 @@ func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64
 
 func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
 	return m.coordinator.GetNode(nodeId)
+}
+
+func (m *MongoProvider) LastPingPurge() (time.Time, error) {
+	return m.coordinator.LastPingPurge()
+}
+
+func (m *MongoProvider) RecordPingPurge(at time.Time, fencingToken int64) (bool, error) {
+	return m.coordinator.RecordPingPurge(at, fencingToken)
 }

@@ -2139,7 +2139,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	}
 	r.IncrementCounter(stream, eventToken, true)
 
-	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: stream.AckJti(rec.Jti), EnqueuedAt: time.Now()}
+	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: stream.AckJti(rec.Jti), EnqueuedAt: time.Now(), Ping: interfaces.IsPing(rec.Types)}
 	if err := r.eventService.AddEventToStream(r.ctx, opRef, stream.Id.Hex()); err != nil {
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err

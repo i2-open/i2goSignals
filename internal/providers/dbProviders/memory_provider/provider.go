@@ -362,3 +362,11 @@ func (m *MemoryProvider) GetLeaseOwner(resource string) (string, time.Time, int6
 func (m *MemoryProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
 	return m.coordinator.GetNode(nodeId)
 }
+
+func (m *MemoryProvider) LastPingPurge() (time.Time, error) {
+	return m.coordinator.LastPingPurge()
+}
+
+func (m *MemoryProvider) RecordPingPurge(at time.Time, fencingToken int64) (bool, error) {
+	return m.coordinator.RecordPingPurge(at, fencingToken)
+}

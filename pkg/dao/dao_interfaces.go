@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -201,6 +202,28 @@ type EventDAO interface {
 	// WatchPending reports every deliveries insert or update that leaves a
 	// row in state pending; the callback receives the row's jti and ackJti.
 	WatchPending(ctx context.Context, callback func(ref PendingRef, streamID string)) error
+
+	// --- Ping purge (ADR 0048) ---
+
+	// PurgePingWindow deletes, in this order: delivery rows marked as ping
+	// rows, in state DeliveryStateDelivered, with createdAt < to; then ping
+	// bodies (types contains events.VerificationEventUri) whose receivedAt
+	// is in [from, to) and that no pending delivery row references (key:
+	// originalJti, else jti, as SweepExpired). It never touches a pending row
+	// or a non-ping body. Bodies without receivedAt and rows without the
+	// marker (stored before the marker existed) are left alone.
+	PurgePingWindow(ctx context.Context, from, to time.Time) (PingPurgeResult, error)
+	// OldestPingStoredAt reports the stored-at time (receivedAt) of the
+	// oldest ping body; ok=false when none.
+	OldestPingStoredAt(ctx context.Context) (at time.Time, ok bool, err error)
+}
+
+// PingPurgeResult reports one PurgePingWindow call.
+type PingPurgeResult struct{ Deliveries, Bodies int64 }
+
+// IsPing reports whether types names a ping (an SSF verification event).
+func IsPing(types []string) bool {
+	return slices.Contains(types, events.VerificationEventUri)
 }
 
 // Delivery reference states stored in deliveries.state. state is a string so
@@ -250,6 +273,9 @@ type PendingRef struct {
 	Jti        string
 	AckJti     string
 	EnqueuedAt time.Time
+	// Ping marks the referenced body as a ping (ADR 0048); every caller that
+	// holds the body's Types sets it. The zero value is "not a ping".
+	Ping bool
 }
 
 // SubjectFilterDAO handles per-stream SSF §8.1.3 subject filter entries. The

@@ -366,3 +366,43 @@ func (c *MongoCoordinator) PurgeExpiredLeases(before time.Time, keep func(resour
 	}
 	return int(res.DeletedCount), nil
 }
+
+// LastPingPurge returns the lastPurgeAt of the ping-purge lease row (zero
+// time if none).
+func (c *MongoCoordinator) LastPingPurge() (time.Time, error) {
+	col := c.leaseCol.Load()
+	if col == nil {
+		return time.Time{}, errCoordinatorNotInit
+	}
+	ctx, cancel := c.opCtx()
+	defer cancel()
+
+	var lease model.ClusterLease
+	err := col.FindOne(ctx, bson.M{"_id": cluster.PingPurgeResource}).Decode(&lease)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+	return lease.LastPurgeAt, nil
+}
+
+// RecordPingPurge stores at as lastPurgeAt on the ping-purge lease row while
+// fencingToken is its current token; a superseded holder records nothing.
+func (c *MongoCoordinator) RecordPingPurge(at time.Time, fencingToken int64) (bool, error) {
+	col := c.leaseCol.Load()
+	if col == nil {
+		return false, errCoordinatorNotInit
+	}
+	ctx, cancel := c.opCtx()
+	defer cancel()
+
+	filter := bson.M{"_id": cluster.PingPurgeResource, "fencingToken": fencingToken}
+	update := bson.M{"$set": bson.M{"lastPurgeAt": at.UTC(), "updatedAt": c.now()}}
+	res, err := col.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount == 1, nil
+}

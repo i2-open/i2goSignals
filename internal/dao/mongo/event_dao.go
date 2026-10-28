@@ -32,6 +32,8 @@ type deliveryDoc struct {
 	CreatedAt time.Time     `bson:"createdAt"`
 	AckDate   *time.Time    `bson:"ackDate,omitempty"`
 	ExpireAt  *time.Time    `bson:"expireAt,omitempty"`
+	// Ping marks a row whose body is a ping (ADR 0048); absent otherwise.
+	Ping bool `bson:"ping,omitempty"`
 }
 
 func (doc *deliveryDoc) ref() interfaces.PendingRef {
@@ -50,7 +52,7 @@ func (doc *deliveryDoc) deliverable() interfaces.DeliverableEvent {
 // pendingDeliveryDoc builds the pending document of ref for sid. An empty
 // AckJti is stored as Jti and a zero EnqueuedAt as now.
 func pendingDeliveryDoc(sid bson.ObjectID, ref interfaces.PendingRef, now time.Time) *deliveryDoc {
-	doc := &deliveryDoc{Sid: sid, Jti: ref.Jti, AckJti: ref.AckJti, State: interfaces.DeliveryStatePending, CreatedAt: ref.EnqueuedAt}
+	doc := &deliveryDoc{Sid: sid, Jti: ref.Jti, AckJti: ref.AckJti, State: interfaces.DeliveryStatePending, CreatedAt: ref.EnqueuedAt, Ping: ref.Ping}
 	if doc.AckJti == "" {
 		doc.AckJti = doc.Jti
 	}
@@ -58,6 +60,27 @@ func pendingDeliveryDoc(sid bson.ObjectID, ref interfaces.PendingRef, now time.T
 		doc.CreatedAt = now
 	}
 	return doc
+}
+
+// stampReceived returns record with ReceivedAt set to now when it is zero
+// (ADR 0048). The stamp goes on a COPY so the caller's record is never
+// mutated; a record that already carries ReceivedAt (or nil) is returned as is.
+func stampReceived(record *model.EventRecord, now time.Time) *model.EventRecord {
+	if record == nil || !record.ReceivedAt.IsZero() {
+		return record
+	}
+	stamped := *record
+	stamped.ReceivedAt = now
+	return &stamped
+}
+
+// stampAllReceived is stampReceived over records, into a new slice.
+func stampAllReceived(records []*model.EventRecord, now time.Time) []*model.EventRecord {
+	out := make([]*model.EventRecord, len(records))
+	for i, rec := range records {
+		out[i] = stampReceived(rec, now)
+	}
+	return out
 }
 
 // EventStoreWriteConcern is the write concern of the ingest durability
@@ -168,7 +191,7 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) e
 	if err != nil {
 		return err
 	}
-	_, err = c.InsertOne(ctx, record)
+	_, err = c.InsertOne(ctx, stampReceived(record, time.Now()))
 	if err != nil {
 		// JTI is the persistence-layer dedup key (RFC 8417 §2.2). The
 		// sparse-unique eventJtiUnique index installed by createIndexes is
@@ -196,9 +219,10 @@ func (d *EventDAOMongo) InsertMany(ctx context.Context, records []*model.EventRe
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
 	docs := make([]any, len(records))
 	for i, rec := range records {
-		docs[i] = rec
+		docs[i] = stampReceived(rec, now)
 	}
 	_, err = c.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
 	if err == nil {
@@ -245,9 +269,20 @@ func (d *EventDAOMongo) InsertWithPending(ctx context.Context, records []*model.
 	if err != nil {
 		return nil, err
 	}
-	streams, err := pendingDocs(interfaces.StreamsByJti(pending), time.Now())
+	now := time.Now()
+	streams, err := pendingDocs(interfaces.StreamsByJti(pending), now)
 	if err != nil {
 		return nil, err
+	}
+	records = stampAllReceived(records, now)
+	// The records are at hand, so a ping's references carry the marker even
+	// when the caller did not set PendingRef.Ping (ADR 0048).
+	for _, rec := range records {
+		if interfaces.IsPing(rec.Types) {
+			for _, doc := range streams[rec.Jti] {
+				doc.Ping = true
+			}
+		}
 	}
 	if d.oneTrip.Load() {
 		return insertWithPendingOneTrip(ctx, ec, dc, records, streams)
@@ -516,18 +551,23 @@ func pendingUpsertFilter(sid bson.ObjectID, jti string) bson.D {
 }
 
 func pendingUpsertPipeline(doc *deliveryDoc) mongo.Pipeline {
+	set := bson.D{
+		{Key: "sid", Value: doc.Sid},
+		{Key: "jti", Value: bson.D{{Key: "$literal", Value: doc.Jti}}},
+		{Key: "ackJti", Value: bson.D{{Key: "$literal", Value: doc.AckJti}}},
+		{Key: "createdAt", Value: bson.D{{Key: "$cond", Value: bson.A{
+			bson.D{{Key: "$eq", Value: bson.A{"$state", interfaces.DeliveryStatePending}}},
+			"$createdAt",
+			doc.CreatedAt,
+		}}}},
+		{Key: "state", Value: interfaces.DeliveryStatePending},
+	}
+	if doc.Ping {
+		// Set, never cleared: a ping row stays a ping row (ADR 0048).
+		set = append(set, bson.E{Key: "ping", Value: true})
+	}
 	return mongo.Pipeline{
-		{{Key: "$set", Value: bson.D{
-			{Key: "sid", Value: doc.Sid},
-			{Key: "jti", Value: bson.D{{Key: "$literal", Value: doc.Jti}}},
-			{Key: "ackJti", Value: bson.D{{Key: "$literal", Value: doc.AckJti}}},
-			{Key: "createdAt", Value: bson.D{{Key: "$cond", Value: bson.A{
-				bson.D{{Key: "$eq", Value: bson.A{"$state", interfaces.DeliveryStatePending}}},
-				"$createdAt",
-				doc.CreatedAt,
-			}}}},
-			{Key: "state", Value: interfaces.DeliveryStatePending},
-		}}},
+		{{Key: "$set", Value: set}},
 		{{Key: "$unset", Value: bson.A{"ackDate", "expireAt"}}},
 	}
 }
@@ -590,6 +630,10 @@ func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, ackJtis m
 	if err != nil {
 		return nil, err
 	}
+	ping, err := d.bodyIsPing(ctx, jti)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now()
 	streamIDs := make([]string, 0, len(ackJtis))
 	models := make([]mongo.WriteModel, 0, len(ackJtis))
@@ -598,7 +642,7 @@ func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, ackJtis m
 		if err != nil {
 			return nil, err
 		}
-		doc := pendingDeliveryDoc(sid, interfaces.PendingRef{Jti: jti, AckJti: ackJti}, now)
+		doc := pendingDeliveryDoc(sid, interfaces.PendingRef{Jti: jti, AckJti: ackJti, Ping: ping}, now)
 		streamIDs = append(streamIDs, streamID)
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(pendingUpsertFilter(sid, jti)).
 			SetUpdate(bson.D{{Key: "$setOnInsert", Value: doc}}).SetUpsert(true))
@@ -624,6 +668,30 @@ func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, ackJtis m
 		}
 	}
 	return queued, nil
+}
+
+// bodyIsPing reports whether the stored body of jti is a ping. EnsurePending
+// is the ADR 0043 repair path, not the hot path, so the one read is cheap
+// enough; an absent body is not a ping.
+func (d *EventDAOMongo) bodyIsPing(ctx context.Context, jti string) (bool, error) {
+	ec, err := d.eventColLoad()
+	if err != nil {
+		return false, err
+	}
+	var body struct {
+		Types []string `bson:"types"`
+	}
+	err = ec.FindOne(ctx, bson.D{{Key: "jti", Value: jti}},
+		options.FindOne().SetProjection(bson.D{{Key: "types", Value: 1}})).Decode(&body)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		// WARN, not ERROR: the duplicate SET is refused and its sender retries (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading event types for re-queue", "jti", jti, "error", err)
+		return false, err
+	}
+	return interfaces.IsPing(body.Types), nil
 }
 
 func allDuplicateKey(wes []mongo.BulkWriteError) bool {
@@ -852,6 +920,9 @@ func (d *EventDAOMongo) Ack(ctx context.Context, batch interfaces.AckBatch) (int
 	sid, err := ParseObjectID(batch.StreamID)
 	if err != nil {
 		return 0, err
+	}
+	if len(batch.Copies) > 0 {
+		batch.Copies = stampAllReceived(batch.Copies, time.Now())
 	}
 	if d.oneTrip.Load() {
 		return ackOneTrip(ctx, ec, dc, sid, batch)

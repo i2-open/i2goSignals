@@ -11,6 +11,9 @@ type ClusterLease struct {
 	CreatedAt    time.Time `bson:"createdAt" json:"createdAt"`
 	UpdatedAt    time.Time `bson:"updatedAt" json:"updatedAt"`
 	FencingToken int64     `bson:"fencingToken" json:"fencingToken"`
+	// LastPurgeAt is set only on the maintenance:ping-purge row: the time of
+	// the cluster's last completed ping purge (ADR 0048).
+	LastPurgeAt time.Time `bson:"lastPurgeAt,omitempty" json:"lastPurgeAt,omitzero"`
 }
 
 type ClusterNode struct {

@@ -22,6 +22,8 @@ type delivery struct {
 	CreatedAt time.Time
 	AckDate   time.Time
 	ExpireAt  *time.Time
+	// Ping marks a row whose body is a ping (ADR 0048).
+	Ping bool
 }
 
 type EventDAOMemory struct {
@@ -116,8 +118,11 @@ func (d *EventDAOMemory) InsertWithPending(_ context.Context, records []*model.E
 		if results[i] = d.insertLocked(rec); results[i] != nil {
 			continue
 		}
+		ping := interfaces.IsPing(rec.Types)
 		for _, t := range streams[rec.Jti] {
-			d.insertPendingLocked(t.StreamID, t.Ref, now)
+			ref := t.Ref
+			ref.Ping = ref.Ping || ping
+			d.insertPendingLocked(t.StreamID, ref, now)
 		}
 	}
 	return results, nil
@@ -129,6 +134,13 @@ func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	// the existing record untouched (matches Mongo's reject-new-write semantic).
 	if _, exists := d.events[record.Jti]; exists {
 		return interfaces.ErrDuplicateJTI
+	}
+	if record.ReceivedAt.IsZero() {
+		// Stamp the stored-at clock on a COPY (ADR 0048), never the caller's
+		// record, for the same reason the disk path strips a copy below.
+		stamped := *record
+		stamped.ReceivedAt = d.now()
+		record = &stamped
 	}
 
 	if d.useDisk {
@@ -322,6 +334,7 @@ func (d *EventDAOMemory) insertPendingLocked(streamID string, ref interfaces.Pen
 		AckJti:    refAckJti(ref),
 		State:     interfaces.DeliveryStatePending,
 		CreatedAt: refCreatedAt(ref, now),
+		Ping:      ref.Ping,
 	})
 	return true
 }
@@ -341,6 +354,9 @@ func (d *EventDAOMemory) upsertPendingLocked(streamID string, ref interfaces.Pen
 	row.State = interfaces.DeliveryStatePending
 	row.AckDate = time.Time{}
 	row.ExpireAt = nil
+	if ref.Ping {
+		row.Ping = true
+	}
 	d.setAckJtiLocked(streamID, row, refAckJti(ref))
 }
 
@@ -378,9 +394,15 @@ func (d *EventDAOMemory) EnsurePending(_ context.Context, jti string, ackJtis ma
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
+	// The repair path reads the body's types so a repaired row carries the
+	// ping marker (ADR 0048).
+	ping := false
+	if rec, ok := d.events[jti]; ok {
+		ping = interfaces.IsPing(rec.Types)
+	}
 	var queued []string
 	for streamID, ackJti := range ackJtis {
-		if d.insertPendingLocked(streamID, interfaces.PendingRef{Jti: jti, AckJti: ackJti}, now) {
+		if d.insertPendingLocked(streamID, interfaces.PendingRef{Jti: jti, AckJti: ackJti, Ping: ping}, now) {
 			queued = append(queued, streamID)
 		}
 	}
@@ -619,6 +641,66 @@ func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCuto
 		result.Bodies++
 	}
 	return result, nil
+}
+
+// PurgePingWindow deletes delivered ping-marked rows with createdAt < to, then
+// every ping body with receivedAt in [from, to) whose reference key
+// (OriginalJti when set, else Jti) has no pending row (ADR 0048). Bodies with
+// no receivedAt and unmarked rows are left alone.
+func (d *EventDAOMemory) PurgePingWindow(_ context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var result interfaces.PingPurgeResult
+	pending := make(map[string]struct{})
+	for streamID, rows := range d.deliveries {
+		for jti, row := range rows {
+			if row.State == interfaces.DeliveryStatePending {
+				pending[jti] = struct{}{}
+				continue
+			}
+			if row.Ping && row.State == interfaces.DeliveryStateDelivered && row.CreatedAt.Before(to) {
+				d.deleteRowLocked(streamID, row)
+				result.Deliveries++
+			}
+		}
+	}
+	for jti, rec := range d.events {
+		if !interfaces.IsPing(rec.Types) || rec.ReceivedAt.IsZero() ||
+			rec.ReceivedAt.Before(from) || !rec.ReceivedAt.Before(to) {
+			continue
+		}
+		key := rec.Jti
+		if rec.OriginalJti != "" {
+			key = rec.OriginalJti
+		}
+		if _, ok := pending[key]; ok {
+			continue
+		}
+		delete(d.events, jti)
+		if d.useDisk {
+			d.deleteEventFromDiskLocked(jti)
+		}
+		result.Bodies++
+	}
+	return result, nil
+}
+
+// OldestPingStoredAt returns the earliest receivedAt among ping bodies.
+func (d *EventDAOMemory) OldestPingStoredAt(_ context.Context) (time.Time, bool, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var oldest time.Time
+	found := false
+	for _, rec := range d.events {
+		if !interfaces.IsPing(rec.Types) || rec.ReceivedAt.IsZero() {
+			continue
+		}
+		if !found || rec.ReceivedAt.Before(oldest) {
+			oldest, found = rec.ReceivedAt, true
+		}
+	}
+	return oldest, found, nil
 }
 
 // MigrateLegacyDeliveries has nothing to carry in memory: the persisted files

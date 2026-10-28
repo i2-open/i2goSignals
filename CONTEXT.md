@@ -1140,6 +1140,14 @@ a narrowly-scoped `STRICT` receiver never rejects its own verification
 handshake. Distinct from the enterprise product's control-stream
 events, which are not community vocabulary.
 
+**Ping event** (ADR 0048, planning#142): A Verification Event, whoever sent it: a keepalive or
+operator-triggered verify that goSignals transmits, or one it receives
+from a peer SSF server. It is a diagnostic event, not a data event; it
+is kept only for short-term diagnosis, unlike data events, which follow
+their stream's retention.
+_Avoid_: heartbeat, keepalive event (a keepalive is one source of ping
+events, not the whole set), verify SET
+
 ## Adding a new persistence method
 
 1. Add the method to the appropriate **DAO interface**

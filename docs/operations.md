@@ -426,10 +426,60 @@ and replay automatically when the stream re-enables).
 
 ## Event retention
 
-> **A community deployment keeps every event forever.** Nothing in the shipped
-> configuration ever expires a SET. That is intentional (ADR 0055), not a
-> defect — but it is *silent*, so an operator who never opts in does not find
-> out until the collections are already large.
+> **A community deployment keeps every data event forever.** Nothing in the
+> shipped configuration ever expires a data SET. That is intentional (ADR 0055),
+> not a defect — but it is *silent*, so an operator who never opts in does not
+> find out until the collections are already large. **Ping events are the one
+> exception:** they are purged 24 hours after they are stored (see
+> [below](#ping-events-are-purged-after-24-hours), ADR 0048).
+
+### Ping events are purged after 24 hours
+
+A **ping event** is an SSF Verification Event, whoever sent it: an idle
+keepalive or an operator-triggered verify this server transmits, or one it
+received from a peer. Pings are diagnostic, so they are not kept forever.
+
+- **What is purged.** A ping whose delivery record is *delivered* on a stream,
+  and its body in `events`, once the body was stored longer ago than
+  `I2SIG_PING_RETENTION` (default `24h`). A received ping that was never queued
+  to any stream is purged too. The clock is the time this server stored the
+  body, not the SET's `iat`.
+- **What is never purged.** A ping still **pending** on any stream keeps its
+  body and its pending record, even when it was delivered on another stream.
+  Data events are never touched; they follow their stream's retention (above).
+- **Who runs it.** One node per cluster, every 6 hours, under a cluster-wide
+  lease (`maintenance:ping-purge`). The lease row stores the last purge time,
+  so the next run is due 6 hours after it whichever node takes the lease, and
+  the stream-table reaper keeps that row. The first check runs 5 minutes after
+  start. The interval is fixed; only the retention is a setting.
+- **How it deletes.** Oldest first, in one-hour windows of stored time, with a
+  one-second pause between windows, so a large backlog does not become one
+  long delete or a replication-lag burst. A node that loses the lease or shuts
+  down stops between windows and records nothing; the next run picks up from
+  the oldest ping left.
+- **Turning it off.** `I2SIG_PING_RETENTION=0`. An unparseable or negative
+  value logs a `WARN` and uses `24h`.
+- **What it logs.** At startup, beside the event-retention posture line:
+
+    ```
+    level=INFO msg="ping retention 24h; purge every 6h, one node per cluster" component=PING-PURGE
+    ```
+
+    or `ping purge off (I2SIG_PING_RETENTION=0)`. After each run, one `INFO`
+    summary:
+
+    ```
+    level=INFO msg="Ping purge complete" component=PING-PURGE deliveries=1200 bodies=1180 windows=6 duration=2.1s cutoff=...
+    ```
+
+    A failed window or a lost lease logs a `WARN` and leaves the purge
+    unrecorded, so the next check retries. There are no metrics.
+- **Disk space is not returned.** MongoDB keeps the space freed by deletes
+  inside the collection files and reuses it for new writes. The server never
+  runs `compact`. To return the space to the volume after a large purge, run
+  `compact` on `events` and `deliveries` yourself, one replica-set member at a
+  time, in a maintenance window (see the MongoDB `compact` documentation for
+  its locking on your server version).
 
 ### Why nothing expires
 

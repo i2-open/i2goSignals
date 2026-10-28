@@ -359,7 +359,7 @@ func (q *deliveryQueue) Served(rec *model.EventRecord, signed *goSet.SecurityEve
 			}
 			ackJti = signed.ID
 		}
-		q.holdLocked(interfaces.PendingRef{Jti: rec.Jti, AckJti: ackJti, EnqueuedAt: rec.SortTime}, false)
+		q.holdLocked(interfaces.PendingRef{Jti: rec.Jti, AckJti: ackJti, EnqueuedAt: rec.SortTime, Ping: interfaces.IsPing(rec.Types)}, false)
 		if qr, ok = q.refs[rec.Jti]; !ok {
 			return
 		}

@@ -9,12 +9,13 @@ import (
 // Index names on the deliveries collection (#359). Named explicitly so they
 // can be asserted on.
 const (
-	DeliveriesSidJtiIndexName           = "deliveriesSidJti"
-	DeliveriesSidAckJtiIndexName        = "deliveriesSidAckJti"
-	DeliveriesSidStateJtiIndexName      = "deliveriesSidStateJti"
-	DeliveriesExpireAtIndexName         = "deliveriesExpireAt"
-	DeliveriesJtiIndexName              = "deliveriesJti"
-	DeliveriesPendingCreatedAtIndexName = "deliveriesPendingCreatedAt"
+	DeliveriesSidJtiIndexName             = "deliveriesSidJti"
+	DeliveriesSidAckJtiIndexName          = "deliveriesSidAckJti"
+	DeliveriesSidStateJtiIndexName        = "deliveriesSidStateJti"
+	DeliveriesExpireAtIndexName           = "deliveriesExpireAt"
+	DeliveriesJtiIndexName                = "deliveriesJti"
+	DeliveriesPendingCreatedAtIndexName   = "deliveriesPendingCreatedAt"
+	DeliveriesPingStateCreatedAtIndexName = "deliveriesPingStateCreatedAt"
 )
 
 // DeliveriesIndexModels are the access-path indexes of the deliveries
@@ -31,6 +32,9 @@ const (
 //     are kept forever.
 //   - {jti} — DeleteBodyIfUnreferenced counts references by jti alone.
 //   - {sid, createdAt} partial on state pending — the OldestBeyond read.
+//   - {ping, state, createdAt} partial on ping true — the ping purge's
+//     delivered-row delete (ADR 0048); data rows carry no ping field, so
+//     they pay no index cost.
 func DeliveriesIndexModels() []mongo.IndexModel {
 	return []mongo.IndexModel{
 		{
@@ -57,6 +61,11 @@ func DeliveriesIndexModels() []mongo.IndexModel {
 			Keys: bson.D{{Key: "sid", Value: 1}, {Key: "createdAt", Value: 1}},
 			Options: options.Index().SetName(DeliveriesPendingCreatedAtIndexName).
 				SetPartialFilterExpression(bson.D{{Key: "state", Value: "pending"}}),
+		},
+		{
+			Keys: bson.D{{Key: "ping", Value: 1}, {Key: "state", Value: 1}, {Key: "createdAt", Value: 1}},
+			Options: options.Index().SetName(DeliveriesPingStateCreatedAtIndexName).
+				SetPartialFilterExpression(bson.D{{Key: "ping", Value: true}}),
 		},
 	}
 }
