@@ -33,7 +33,7 @@ func (c closeProbe) Close() error {
 }
 
 // Caller pin (ADR 0048, #388): NewApplication builds and starts the ping
-// purger and logs its posture; Shutdown stops it before storage closes.
+// purger and logs its cleanup schedule; Shutdown stops it before storage closes.
 func TestNewApplication_WiresPingPurger(t *testing.T) {
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	t.Setenv("I2SIG_SHUTDOWN_DRAIN", "0")

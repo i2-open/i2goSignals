@@ -14,7 +14,7 @@ import (
 )
 
 // signSet produces a signed SET wire string plus the JWKS a verifier needs to
-// accept it. RS256 matches the production posture used elsewhere in pkg/goSet.
+// accept it. RS256 is the signing algorithm production uses elsewhere in pkg/goSet.
 func signSet(t *testing.T, set *goSet.SecurityEventToken) (string, *keyfunc.JWKS) {
 	t.Helper()
 

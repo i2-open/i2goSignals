@@ -935,7 +935,7 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	// Best-effort IAT redemption capture: a /register call is a redemption of
 	// the IAT (ADR 0007). A write failure logs at WARN and never blocks
-	// registration, matching the TrackToken posture.
+	// registration, matching the TrackToken behaviour.
 	if parentJTI != "" {
 		remoteIP := model.BuildRemoteIPFromRequest(r).String()
 		if err := sa.GetTokenService().RecordRedemption(r.Context(), parentJTI, remoteIP, time.Now().UTC()); err != nil {
