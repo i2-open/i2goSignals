@@ -259,6 +259,16 @@ func (c *trackedCoordinator) GetNode(nodeId string) (*model.ClusterNode, error) 
 	return c.ClusterCoordinator.GetNode(nodeId)
 }
 
+func (c *trackedCoordinator) LastPingPurge() (time.Time, error) {
+	c.locks.noteRead()
+	return c.ClusterCoordinator.LastPingPurge()
+}
+
+func (c *trackedCoordinator) RecordPingPurge(at time.Time, fencingToken int64) (bool, error) {
+	c.locks.noteRead()
+	return c.ClusterCoordinator.RecordPingPurge(at, fencingToken)
+}
+
 // Unwrap returns the coordinator the router was built with.
 func (c *trackedCoordinator) Unwrap() cluster.ClusterCoordinator {
 	return c.ClusterCoordinator

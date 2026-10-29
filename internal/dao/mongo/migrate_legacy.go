@@ -7,6 +7,7 @@ import (
 	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -30,6 +31,8 @@ type legacyDoc struct {
 	Sid     bson.ObjectID `bson:"sid"`
 	Jti     string        `bson:"jti"`
 	AckDate time.Time     `bson:"ackDate"`
+	// Ping is not stored on the old row: markPings sets it from the body.
+	Ping bool `bson:"-"`
 }
 
 // createdAt is the old document's ObjectID timestamp (one-second resolution),
@@ -81,9 +84,16 @@ func (d *EventDAOMongo) MigrateLegacyDeliveries(ctx context.Context, expireAt fu
 	if _, err = dc.Indexes().CreateMany(ctx, DeliveriesIndexModels()); err != nil {
 		return res, fmt.Errorf("ensure deliveries indexes: %w", err)
 	}
+	ec, err := d.eventColLoad()
+	if err != nil {
+		return res, fmt.Errorf("%w: %v", interfaces.ErrStoreNotReady, err)
+	}
 	now := time.Now().UTC()
 	if present[deliveredName] {
 		if res.Delivered, err = copyLegacy(ctx, db, deliveredName, pendingName, func(batch []legacyDoc) (int64, error) {
+			if err := markPings(ctx, ec, batch); err != nil {
+				return 0, err
+			}
 			return insertDelivered(ctx, dc, batch, expireAt, now)
 		}); err != nil {
 			return res, fmt.Errorf("migrate %s: %w", deliveredName, err)
@@ -91,6 +101,9 @@ func (d *EventDAOMongo) MigrateLegacyDeliveries(ctx context.Context, expireAt fu
 	}
 	if present[pendingName] {
 		if res.Pending, err = copyLegacy(ctx, db, pendingName, deliveredName, func(batch []legacyDoc) (int64, error) {
+			if err := markPings(ctx, ec, batch); err != nil {
+				return 0, err
+			}
 			return upsertPending(ctx, dc, batch, now)
 		}); err != nil {
 			return res, fmt.Errorf("migrate %s: %w", pendingName, err)
@@ -167,6 +180,30 @@ func copyLegacy(ctx context.Context, db *mongo.Database, name, other string, wri
 	return total, flush()
 }
 
+// markPings sets Ping on every row of batch whose body is a ping (ADR 0048),
+// with one read of the events collection per batch.
+func markPings(ctx context.Context, ec *mongo.Collection, batch []legacyDoc) error {
+	jtis := make([]string, len(batch))
+	for i := range batch {
+		jtis[i] = batch[i].Jti
+	}
+	var pings []string
+	if err := ec.Distinct(ctx, "jti", bson.D{
+		{Key: "jti", Value: bson.D{{Key: "$in", Value: jtis}}},
+		{Key: "types", Value: events.VerificationEventUri},
+	}).Decode(&pings); err != nil {
+		return fmt.Errorf("read ping bodies: %w", err)
+	}
+	isPing := make(map[string]struct{}, len(pings))
+	for _, j := range pings {
+		isPing[j] = struct{}{}
+	}
+	for i := range batch {
+		_, batch[i].Ping = isPing[batch[i].Jti]
+	}
+	return nil
+}
+
 // insertDelivered inserts batch as delivered references, ignoring a row that
 // already exists (a rerun, or a pending row carried earlier).
 func insertDelivered(ctx context.Context, dc *mongo.Collection, batch []legacyDoc, expireAt func(string, time.Time) *time.Time, now time.Time) (int64, error) {
@@ -178,7 +215,7 @@ func insertDelivered(ctx context.Context, dc *mongo.Collection, batch []legacyDo
 			created = now
 		}
 		ackDate := old.AckDate
-		doc := &deliveryDoc{Sid: old.Sid, Jti: old.Jti, AckJti: old.Jti, State: interfaces.DeliveryStateDelivered, CreatedAt: created, AckDate: &ackDate}
+		doc := &deliveryDoc{Sid: old.Sid, Jti: old.Jti, AckJti: old.Jti, State: interfaces.DeliveryStateDelivered, CreatedAt: created, AckDate: &ackDate, Ping: old.Ping}
 		if expireAt != nil {
 			doc.ExpireAt = expireAt(old.Sid.Hex(), ackDate)
 		}
@@ -204,6 +241,9 @@ func upsertPending(ctx context.Context, dc *mongo.Collection, batch []legacyDoc,
 	for i := range batch {
 		old := &batch[i]
 		set := bson.D{{Key: "ackJti", Value: old.Jti}, {Key: "state", Value: interfaces.DeliveryStatePending}}
+		if old.Ping {
+			set = append(set, bson.E{Key: "ping", Value: true})
+		}
 		var onInsert bson.D
 		if created, ok := old.createdAt(); ok {
 			set = append(set, bson.E{Key: "createdAt", Value: created})

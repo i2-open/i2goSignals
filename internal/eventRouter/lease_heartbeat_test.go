@@ -64,6 +64,10 @@ func (f *fakeLeaseStore) RegisterNode(model.ClusterNode) error         { return 
 func (f *fakeLeaseStore) GetActiveNodeCount() (int64, error)           { return 0, nil }
 func (f *fakeLeaseStore) GetActiveNodes() ([]model.ClusterNode, error) { return nil, nil }
 func (f *fakeLeaseStore) GetNode(string) (*model.ClusterNode, error)   { return nil, nil }
+func (f *fakeLeaseStore) LastPingPurge() (time.Time, error)            { return time.Time{}, nil }
+func (f *fakeLeaseStore) RecordPingPurge(time.Time, int64) (bool, error) {
+	return false, nil
+}
 
 // TestLeaseHeartbeat_RenewsOnTheInterval pins the cadence and the renewal
 // arguments. The first renewal is one interval in, not immediate: acquisition

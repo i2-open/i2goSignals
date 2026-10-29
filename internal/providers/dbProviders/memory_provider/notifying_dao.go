@@ -504,3 +504,22 @@ func (d *notifyingTokenDAO) FindByClientID(ctx context.Context, clientID string)
 func (d *notifyingTokenDAO) FindAll(ctx context.Context) ([]*model.TokenRecord, error) {
 	return d.inner.FindAll(ctx)
 }
+
+func (d *notifyingEventDAO) PurgePingWindow(ctx context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
+	res, err := d.inner.PurgePingWindow(ctx, from, to)
+	if err != nil {
+		return res, err
+	}
+	if res.Deliveries > 0 || res.Bodies > 0 {
+		d.notify()
+	}
+	return res, nil
+}
+
+func (d *notifyingEventDAO) MigratePingMarkers(ctx context.Context) (interfaces.PingMarkerResult, error) {
+	return d.inner.MigratePingMarkers(ctx)
+}
+
+func (d *notifyingEventDAO) OldestPingStoredAt(ctx context.Context) (time.Time, bool, error) {
+	return d.inner.OldestPingStoredAt(ctx)
+}

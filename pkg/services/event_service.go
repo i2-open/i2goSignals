@@ -300,6 +300,12 @@ func (s *EventService) ResetPendingAckJti(ctx context.Context, streamID string) 
 	return s.eventDAO.ResetPendingAckJti(ctx, streamID)
 }
 
+// MigratePingMarkers backfills the ping marker on delivery rows written before
+// it existed (ADR 0048); idempotent, a no-op once done.
+func (s *EventService) MigratePingMarkers(ctx context.Context) (interfaces.PingMarkerResult, error) {
+	return s.eventDAO.MigratePingMarkers(ctx)
+}
+
 // MigrateLegacyDeliveries carries the pre-#359 pending/delivered collections
 // into deliveries. expireAt computes a delivered row's expiry.
 func (s *EventService) MigrateLegacyDeliveries(ctx context.Context, expireAt func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
@@ -505,7 +511,7 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	// (tagged source:reset downstream). A failed re-queue is not re-delivered and
 	// so is not metered.
 	for _, event := range events {
-		ref := interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti, EnqueuedAt: time.Now()}
+		ref := interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti, EnqueuedAt: time.Now(), Ping: interfaces.IsPing(event.Types)}
 		if ackJti != nil {
 			ref.AckJti = ackJti(event.Jti)
 		}

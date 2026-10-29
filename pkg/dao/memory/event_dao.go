@@ -22,6 +22,8 @@ type delivery struct {
 	CreatedAt time.Time
 	AckDate   time.Time
 	ExpireAt  *time.Time
+	// Ping marks a row whose body is a ping (ADR 0048).
+	Ping bool
 }
 
 type EventDAOMemory struct {
@@ -116,8 +118,11 @@ func (d *EventDAOMemory) InsertWithPending(_ context.Context, records []*model.E
 		if results[i] = d.insertLocked(rec); results[i] != nil {
 			continue
 		}
+		ping := interfaces.IsPing(rec.Types)
 		for _, t := range streams[rec.Jti] {
-			d.insertPendingLocked(t.StreamID, t.Ref, now)
+			ref := t.Ref
+			ref.Ping = ref.Ping || ping
+			d.insertPendingLocked(t.StreamID, ref, now)
 		}
 	}
 	return results, nil
@@ -129,6 +134,13 @@ func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	// the existing record untouched (matches Mongo's reject-new-write semantic).
 	if _, exists := d.events[record.Jti]; exists {
 		return interfaces.ErrDuplicateJTI
+	}
+	if record.ReceivedAt.IsZero() {
+		// Stamp the stored-at clock on a COPY (ADR 0048), never the caller's
+		// record, for the same reason the disk path strips a copy below.
+		stamped := *record
+		stamped.ReceivedAt = d.now()
+		record = &stamped
 	}
 
 	if d.useDisk {
@@ -322,6 +334,7 @@ func (d *EventDAOMemory) insertPendingLocked(streamID string, ref interfaces.Pen
 		AckJti:    refAckJti(ref),
 		State:     interfaces.DeliveryStatePending,
 		CreatedAt: refCreatedAt(ref, now),
+		Ping:      ref.Ping,
 	})
 	return true
 }
@@ -341,6 +354,9 @@ func (d *EventDAOMemory) upsertPendingLocked(streamID string, ref interfaces.Pen
 	row.State = interfaces.DeliveryStatePending
 	row.AckDate = time.Time{}
 	row.ExpireAt = nil
+	if ref.Ping {
+		row.Ping = true
+	}
 	d.setAckJtiLocked(streamID, row, refAckJti(ref))
 }
 
@@ -378,9 +394,15 @@ func (d *EventDAOMemory) EnsurePending(_ context.Context, jti string, ackJtis ma
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
+	// The repair path reads the body's types so a repaired row carries the
+	// ping marker (ADR 0048).
+	ping := false
+	if rec, ok := d.events[jti]; ok {
+		ping = interfaces.IsPing(rec.Types)
+	}
 	var queued []string
 	for streamID, ackJti := range ackJtis {
-		if d.insertPendingLocked(streamID, interfaces.PendingRef{Jti: jti, AckJti: ackJti}, now) {
+		if d.insertPendingLocked(streamID, interfaces.PendingRef{Jti: jti, AckJti: ackJti, Ping: ping}, now) {
 			queued = append(queued, streamID)
 		}
 	}
@@ -605,11 +627,7 @@ func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCuto
 	}
 
 	for _, rec := range examined {
-		key := rec.Jti
-		if rec.OriginalJti != "" {
-			key = rec.OriginalJti
-		}
-		if _, ok := referenced[key]; ok {
+		if _, ok := referenced[refKey(rec)]; ok {
 			continue
 		}
 		delete(d.events, rec.Jti)
@@ -621,10 +639,94 @@ func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCuto
 	return result, nil
 }
 
+// refKey is the jti a body's delivery rows carry: OriginalJti when set, else
+// Jti.
+func refKey(rec *model.EventRecord) string {
+	if rec.OriginalJti != "" {
+		return rec.OriginalJti
+	}
+	return rec.Jti
+}
+
+// storedAt is a body's stored-at time for the ping purge: ReceivedAt, else
+// (a body stored before ReceivedAt existed) SortTime (ADR 0048).
+func storedAt(rec *model.EventRecord) time.Time {
+	if !rec.ReceivedAt.IsZero() {
+		return rec.ReceivedAt
+	}
+	return rec.SortTime
+}
+
+// PurgePingWindow deletes delivered ping-marked rows with createdAt < to, then
+// every ping body stored (storedAt) in [from, to) whose reference key
+// (OriginalJti when set, else Jti) has no pending row (ADR 0048). Unmarked
+// rows are left alone.
+func (d *EventDAOMemory) PurgePingWindow(_ context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var result interfaces.PingPurgeResult
+	pending := make(map[string]struct{})
+	for streamID, rows := range d.deliveries {
+		for jti, row := range rows {
+			if row.State == interfaces.DeliveryStatePending {
+				pending[jti] = struct{}{}
+				continue
+			}
+			if row.Ping && row.State == interfaces.DeliveryStateDelivered && row.CreatedAt.Before(to) {
+				d.deleteRowLocked(streamID, row)
+				result.Deliveries++
+			}
+		}
+	}
+	for jti, rec := range d.events {
+		if !interfaces.IsPing(rec.Types) {
+			continue
+		}
+		if at := storedAt(rec); at.IsZero() || at.Before(from) || !at.Before(to) {
+			continue
+		}
+		if _, ok := pending[refKey(rec)]; ok {
+			continue
+		}
+		delete(d.events, jti)
+		if d.useDisk {
+			d.deleteEventFromDiskLocked(jti)
+		}
+		result.Bodies++
+	}
+	return result, nil
+}
+
+// OldestPingStoredAt returns the earliest stored-at time (storedAt) among
+// ping bodies.
+func (d *EventDAOMemory) OldestPingStoredAt(_ context.Context) (time.Time, bool, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var oldest time.Time
+	found := false
+	for _, rec := range d.events {
+		at := storedAt(rec)
+		if !interfaces.IsPing(rec.Types) || at.IsZero() {
+			continue
+		}
+		if !found || at.Before(oldest) {
+			oldest, found = at, true
+		}
+	}
+	return oldest, found, nil
+}
+
 // MigrateLegacyDeliveries has nothing to carry in memory: the persisted files
 // already load into the deliveries map, so the old collections are "gone".
 func (d *EventDAOMemory) MigrateLegacyDeliveries(_ context.Context, _ func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
 	return interfaces.MigrationResult{Dropped: true}, nil
+}
+
+// MigratePingMarkers has nothing to backfill in memory: SetState derives the
+// marker from the body for every row it loads from disk.
+func (d *EventDAOMemory) MigratePingMarkers(_ context.Context) (interfaces.PingMarkerResult, error) {
+	return interfaces.PingMarkerResult{AlreadyDone: true}, nil
 }
 
 func (row *delivery) deliverable(streamID string) interfaces.DeliverableEvent {
@@ -784,8 +886,9 @@ func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pendi
 // SetState replaces the store from its persisted shape. A nil argument keeps
 // the current contents of that part (for pending / delivered: the rows in that
 // state). An entry loaded without ackJti gets ackJti = jti, and one without
-// createdAt gets the load time. A JTI listed both pending and delivered for a
-// stream is kept pending (at-least-once).
+// createdAt gets the load time. A loaded row carries the ping marker when its
+// body is a ping (the persisted shape has no marker; ADR 0048). A JTI listed
+// both pending and delivered for a stream is kept pending (at-least-once).
 func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -814,6 +917,9 @@ func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending 
 		}
 		if row.CreatedAt.IsZero() {
 			row.CreatedAt = now
+		}
+		if rec, ok := d.events[row.Jti]; ok {
+			row.Ping = interfaces.IsPing(rec.Types)
 		}
 		return row
 	}

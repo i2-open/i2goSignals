@@ -63,7 +63,21 @@ type ClusterCoordinator interface {
 	// GetNode returns the node with the given id. Returns (nil, nil) when
 	// not found.
 	GetNode(nodeId string) (*model.ClusterNode, error)
+
+	// LastPingPurge returns the cluster's last completed ping purge (zero
+	// time if none): the lastPurgeAt of the PingPurgeResource lease row.
+	LastPingPurge() (time.Time, error)
+
+	// RecordPingPurge stores at as lastPurgeAt on the PingPurgeResource lease
+	// row, only while fencingToken is that row's current token; recorded is
+	// false otherwise (ADR 0048).
+	RecordPingPurge(at time.Time, fencingToken int64) (recorded bool, err error)
 }
+
+// PingPurgeResource is the lease resource of the cluster's one ping-purge
+// runner (aliased as services.PingPurgeLeaseResource). Its "maintenance" kind is not a
+// LeaseKind, so the stream-table reaper keeps the row and its lastPurgeAt.
+const PingPurgeResource = "maintenance:ping-purge"
 
 // LeaseKind is the kind prefix of a lease resource: a resource is
 // "<kind>:<stream or pair id>".

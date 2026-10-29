@@ -38,4 +38,8 @@ type EventRecord struct {
 	// JTI of the SET it was re-signed from. Readers that replay history
 	// (FindByTimeRange) exclude records carrying it.
 	OriginalJti string `json:"originalJti,omitempty" bson:"originalJti,omitempty"`
+
+	// ReceivedAt is stamped by the server when the body is stored (ADR 0048).
+	// The ping purge selects ping bodies by it; it is never read from the SET.
+	ReceivedAt time.Time `json:"receivedAt,omitzero" bson:"receivedAt,omitempty"`
 }

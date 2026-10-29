@@ -30,6 +30,7 @@ type leaseEntry struct {
 	fencingToken int64
 	createdAt    time.Time
 	updatedAt    time.Time
+	lastPurgeAt  time.Time
 }
 
 // NewMemoryCoordinator constructs a MemoryCoordinator with empty state.
@@ -187,4 +188,30 @@ func (c *MemoryCoordinator) PurgeExpiredLeases(before time.Time, keep func(resou
 		n++
 	}
 	return n, nil
+}
+
+// LastPingPurge returns the lastPurgeAt of the ping-purge lease row (zero
+// time if none).
+func (c *MemoryCoordinator) LastPingPurge() (time.Time, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.leases[cluster.PingPurgeResource]
+	if !ok {
+		return time.Time{}, nil
+	}
+	return entry.lastPurgeAt, nil
+}
+
+// RecordPingPurge stores at on the ping-purge lease row while fencingToken is
+// its current token.
+func (c *MemoryCoordinator) RecordPingPurge(at time.Time, fencingToken int64) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.leases[cluster.PingPurgeResource]
+	if !ok || entry.fencingToken != fencingToken {
+		return false, nil
+	}
+	entry.lastPurgeAt = at.UTC()
+	entry.updatedAt = c.now().UTC()
+	return true, nil
 }

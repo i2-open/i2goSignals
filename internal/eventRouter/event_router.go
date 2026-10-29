@@ -520,6 +520,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 			failMigration(err)
 		default:
 			logMigration(res)
+			runPingMarkerBackfill(ctx, deps, nodeId)
 		}
 	}
 
@@ -675,6 +676,25 @@ func logMigration(res interfaces.MigrationResult) {
 	}
 }
 
+// runPingMarkerBackfill runs the one-shot ping-marker backfill (ADR 0048,
+// #389) after the deliveries migration. Delivery does not depend on it, so a
+// failure is a WARN and the next start retries it (no done flag is recorded).
+// It reports false only when ctx ended.
+func runPingMarkerBackfill(ctx context.Context, deps RouterDeps, nodeId string) bool {
+	res, err := migratePingMarkers(ctx, deps.EventService, deps.Coordinator, nodeId)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		eventLogger.Warn("ROUTER: ping marker backfill failed; the next start retries it", "node", nodeId, "error", err)
+		return true
+	}
+	if res.Marked > 0 {
+		eventLogger.Info("ROUTER: ping delivery markers backfilled", "marked", res.Marked)
+	}
+	return true
+}
+
 // migrateThenStartDelivery waits for the store, runs the legacy deliveries
 // migration, and only then starts delivery (#361). The state map is read once
 // the store is connected, for the migration's expireAt and the stream
@@ -698,6 +718,9 @@ func (r *router) migrateThenStartDelivery(deps RouterDeps) {
 		failMigration(err)
 	}
 	logMigration(res)
+	if !runPingMarkerBackfill(r.ctx, deps, r.nodeId) {
+		return
+	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	if r.stopping {
@@ -2139,7 +2162,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	}
 	r.IncrementCounter(stream, eventToken, true)
 
-	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: stream.AckJti(rec.Jti), EnqueuedAt: time.Now()}
+	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: stream.AckJti(rec.Jti), EnqueuedAt: time.Now(), Ping: interfaces.IsPing(rec.Types)}
 	if err := r.eventService.AddEventToStream(r.ctx, opRef, stream.Id.Hex()); err != nil {
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err

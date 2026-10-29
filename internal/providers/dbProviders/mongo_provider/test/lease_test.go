@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
@@ -176,6 +177,34 @@ func (s *LeaseTestSuite) TestPurgeExpiredLeasesAndStaleNodes() {
 	liveNode, err := coord.GetNode("reap-live")
 	s.NoError(err)
 	s.NotNil(liveNode)
+}
+
+// TestRecordPingPurge: lastPurgeAt is stored on the ping-purge lease row
+// while the caller's fencing token is current, a stale token records nothing,
+// and a release keeps it (ADR 0048).
+func (s *LeaseTestSuite) TestRecordPingPurge() {
+	coord := s.provider.Coordinator()
+	at, err := coord.LastPingPurge()
+	s.Require().NoError(err)
+	s.True(at.IsZero(), "no row yet")
+
+	ok, token, _, err := coord.TryAcquireOrRenewLease(cluster.PingPurgeResource, "node-1", time.Minute)
+	s.Require().NoError(err)
+	s.Require().True(ok)
+	when := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	recorded, err := coord.RecordPingPurge(when, token)
+	s.Require().NoError(err)
+	s.True(recorded)
+	at, _ = coord.LastPingPurge()
+	s.True(at.Equal(when), "lastPurgeAt = %v, want %v", at, when)
+
+	recorded, err = coord.RecordPingPurge(when.Add(time.Hour), token+1)
+	s.Require().NoError(err)
+	s.False(recorded, "a stale token records nothing")
+
+	s.Require().NoError(coord.ReleaseLeaseIfOwned(cluster.PingPurgeResource, "node-1"))
+	at, _ = coord.LastPingPurge()
+	s.True(at.Equal(when), "a released lease keeps lastPurgeAt")
 }
 
 func TestLeaseSuite(t *testing.T) {

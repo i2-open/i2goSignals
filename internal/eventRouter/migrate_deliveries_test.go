@@ -28,6 +28,14 @@ type migrateDAO struct {
 	err   error
 	// notReadyFor answers ErrStoreNotReady to the first notReadyFor calls.
 	notReadyFor int32
+	// pingCalls counts MigratePingMarkers calls; pingErr is what they return.
+	pingCalls atomic.Int32
+	pingErr   error
+}
+
+func (d *migrateDAO) MigratePingMarkers(context.Context) (interfaces.PingMarkerResult, error) {
+	d.pingCalls.Add(1)
+	return interfaces.PingMarkerResult{}, d.pingErr
 }
 
 func (d *migrateDAO) MigrateLegacyDeliveries(context.Context, func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
@@ -425,4 +433,75 @@ func TestNewRouter_ReplayStreamWaitsForTheMigration(t *testing.T) {
 
 	require.NoError(t, r.ReplayStream(t.Context(), sid, "", &from))
 	assert.EqualValues(t, 2, dao.clears.Load(), "a reset after the start runs at once")
+}
+
+// markerDAO stands in for a store's MigratePingMarkers (#389): the first call
+// does the work (taking `took` of fake time) and records the done flag; later
+// calls find it. inside tracks overlapping calls.
+type markerDAO struct {
+	interfaces.EventDAO
+	took    time.Duration
+	done    atomic.Bool
+	inside  atomic.Int32
+	overlap atomic.Bool
+	worked  atomic.Int32
+}
+
+func (d *markerDAO) MigratePingMarkers(context.Context) (interfaces.PingMarkerResult, error) {
+	if d.inside.Add(1) > 1 {
+		d.overlap.Store(true)
+	}
+	defer d.inside.Add(-1)
+	if d.done.Load() {
+		return interfaces.PingMarkerResult{AlreadyDone: true}, nil
+	}
+	time.Sleep(d.took)
+	d.worked.Add(1)
+	d.done.Store(true)
+	return interfaces.PingMarkerResult{Marked: 4}, nil
+}
+
+// Two nodes racing at startup: the lease serialises them, so one does the
+// backfill and the other finds the done flag (#389).
+func TestMigratePingMarkers_TwoNodesRaceUnderTheLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		coord := memory_provider.NewMemoryCoordinator()
+		dao := &markerDAO{took: 3 * migrationLeaseRetry}
+		es := services.NewEventService(dao)
+		results := make(chan interfaces.PingMarkerResult, 2)
+		for _, node := range []string{"node-a", "node-b"} {
+			go func() {
+				res, err := migratePingMarkers(t.Context(), es, coord, node)
+				assert.NoError(t, err)
+				results <- res
+			}()
+		}
+		a, b := <-results, <-results
+		assert.EqualValues(t, 1, dao.worked.Load(), "the backfill ran once")
+		assert.False(t, dao.overlap.Load(), "the two nodes ran the backfill concurrently")
+		assert.ElementsMatch(t, []bool{false, true}, []bool{a.AlreadyDone, b.AlreadyDone})
+		held, _, _, err := coord.TryAcquireOrRenewLease(pingMarkerLeaseResource, "probe", time.Second)
+		require.NoError(t, err)
+		assert.True(t, held, "the ping-marker lease is released")
+	})
+}
+
+// NewRouter runs the ping-marker backfill at startup (#389).
+func TestNewRouter_RunsThePingMarkerBackfill(t *testing.T) {
+	p := openMemPersistence(t)
+	dao := &migrateDAO{EventDAO: p.EventDAO}
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator}, "node-mig")
+	t.Cleanup(r.Shutdown)
+	assert.EqualValues(t, 1, dao.pingCalls.Load())
+}
+
+// A failed backfill does not stop the router: delivery does not depend on it.
+func TestNewRouter_PingMarkerBackfillFailureIsNotFatal(t *testing.T) {
+	p := openMemPersistence(t)
+	dao := &migrateDAO{EventDAO: p.EventDAO, pingErr: errors.New("disk on fire")}
+	assert.NotPanics(t, func() {
+		r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator}, "node-mig")
+		r.Shutdown()
+	})
+	assert.EqualValues(t, 1, dao.pingCalls.Load())
 }

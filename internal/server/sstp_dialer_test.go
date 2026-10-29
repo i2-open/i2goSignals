@@ -373,6 +373,11 @@ func (c *oneShotCoordinator) GetNode(nodeId string) (*model.ClusterNode, error) 
 	return &model.ClusterNode{Id: nodeId}, nil
 }
 
+func (c *oneShotCoordinator) LastPingPurge() (time.Time, error) { return time.Time{}, nil }
+func (c *oneShotCoordinator) RecordPingPurge(time.Time, int64) (bool, error) {
+	return false, nil
+}
+
 var _ cluster.ClusterCoordinator = (*oneShotCoordinator)(nil)
 
 // TestSstpDialer_BasicDialAndAck: the dial-and-ack tracer (AC 5a).

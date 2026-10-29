@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -201,6 +202,42 @@ type EventDAO interface {
 	// WatchPending reports every deliveries insert or update that leaves a
 	// row in state pending; the callback receives the row's jti and ackJti.
 	WatchPending(ctx context.Context, callback func(ref PendingRef, streamID string)) error
+
+	// --- Ping purge (ADR 0048) ---
+
+	// PurgePingWindow deletes, in this order: delivery rows marked as ping
+	// rows, in state DeliveryStateDelivered, with createdAt < to; then ping
+	// bodies (types contains events.VerificationEventUri) stored in
+	// [from, to) — receivedAt, else (a body stored before receivedAt
+	// existed) the ObjectId _id time (memory: SortTime) — that no pending
+	// delivery row references (key: originalJti, else jti, as SweepExpired).
+	// It never touches a pending row or a non-ping body. Rows without the
+	// marker (stored before the marker existed) are left alone until
+	// MigratePingMarkers marks them.
+	PurgePingWindow(ctx context.Context, from, to time.Time) (PingPurgeResult, error)
+	// OldestPingStoredAt reports the stored-at time of the oldest ping body
+	// (receivedAt, else the stored-at fallback above); ok=false when none.
+	OldestPingStoredAt(ctx context.Context) (at time.Time, ok bool, err error)
+	// MigratePingMarkers sets the ping marker on delivery rows written before
+	// the marker existed whose body is a ping, once per store: batched,
+	// idempotent and resumable, recording a done flag when it completes; a
+	// later call is a no-op. The caller runs it on one node (lease
+	// "migration:ping-marker").
+	MigratePingMarkers(ctx context.Context) (PingMarkerResult, error)
+}
+
+// PingMarkerResult reports one MigratePingMarkers call.
+type PingMarkerResult struct {
+	Marked      int64 // delivery rows that gained the ping marker
+	AlreadyDone bool  // the done flag was already recorded; nothing was read
+}
+
+// PingPurgeResult reports one PurgePingWindow call.
+type PingPurgeResult struct{ Deliveries, Bodies int64 }
+
+// IsPing reports whether types names a ping (an SSF verification event).
+func IsPing(types []string) bool {
+	return slices.Contains(types, events.VerificationEventUri)
 }
 
 // Delivery reference states stored in deliveries.state. state is a string so
@@ -250,6 +287,9 @@ type PendingRef struct {
 	Jti        string
 	AckJti     string
 	EnqueuedAt time.Time
+	// Ping marks the referenced body as a ping (ADR 0048); every caller that
+	// holds the body's Types sets it. The zero value is "not a ping".
+	Ping bool
 }
 
 // SubjectFilterDAO handles per-stream SSF §8.1.3 subject filter entries. The

@@ -277,3 +277,24 @@ func (d *eventDAO) WatchPending(ctx context.Context, callback func(ref interface
 	d.observe("WatchPending", start, err)
 	return err
 }
+
+func (d *eventDAO) PurgePingWindow(ctx context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
+	start := time.Now()
+	res, err := d.inner.PurgePingWindow(ctx, from, to)
+	d.observe("PurgePingWindow", start, err)
+	return res, err
+}
+
+func (d *eventDAO) MigratePingMarkers(ctx context.Context) (interfaces.PingMarkerResult, error) {
+	start := time.Now()
+	res, err := d.inner.MigratePingMarkers(ctx)
+	d.observe("MigratePingMarkers", start, err)
+	return res, err
+}
+
+func (d *eventDAO) OldestPingStoredAt(ctx context.Context) (time.Time, bool, error) {
+	start := time.Now()
+	at, ok, err := d.inner.OldestPingStoredAt(ctx)
+	d.observe("OldestPingStoredAt", start, err)
+	return at, ok, err
+}

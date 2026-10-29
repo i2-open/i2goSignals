@@ -72,17 +72,20 @@ type SignalsApplication struct {
 	Handler              http.Handler
 	EventRouter          eventRouter.EventRouter
 	SstpDialer           *SstpDialer
-	BaseUrl              *url.URL
-	HostName             string
-	DefIssuer            string
-	AdminRole            string
-	Auth                 *authSupport.AuthIssuer
-	pollClients          map[string]*ClientPollStream
-	pushClients          map[string]*ReceiverPushStream
-	pushReceivers        map[string]model.StreamStateRecord
-	mu                   sync.RWMutex
-	Stats                *PrometheusHandler
-	NodeID               string
+	// PingPurger deletes delivered ping events older than the ping retention
+	// (I2SIG_PING_RETENTION, default 24h), one node per cluster (ADR 0048).
+	PingPurger    *services.PingPurger
+	BaseUrl       *url.URL
+	HostName      string
+	DefIssuer     string
+	AdminRole     string
+	Auth          *authSupport.AuthIssuer
+	pollClients   map[string]*ClientPollStream
+	pushClients   map[string]*ReceiverPushStream
+	pushReceivers map[string]model.StreamStateRecord
+	mu            sync.RWMutex
+	Stats         *PrometheusHandler
+	NodeID        string
 	// localModeUnfenced is true when this node runs I2SIG_STORE_WAL=local
 	// without ring-fed delivery, the only configuration the multi-node guard
 	// applies to (#343). localIngestSuspended records that the guard fired at
@@ -303,6 +306,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, 
 	}
 	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
 	sa.SstpDialer = sstpDialer
+	sa.PingPurger = services.NewPingPurger(persistence.EventDAO, persistence.Coordinator, nodeID,
+		services.PingPurgeOptions{Retention: services.PingRetentionFromEnv()})
 
 	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
 		StreamService:        persistence.StreamService,
@@ -375,9 +380,13 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, 
 	// Keep-forever is community's silent default, so without this the growth
 	// posture is invisible until the collections are already large (#291).
 	sa.logRetentionPosture()
+	sa.PingPurger.LogPosture()
 
 	// Start background sync for clustering
 	go sa.backgroundSync()
+
+	// Purge delivered ping events past the ping retention (ADR 0048).
+	sa.PingPurger.Start(context.Background())
 
 	// Start internal cluster server if requested on a different port
 	sa.startInternalServer()
@@ -650,6 +659,10 @@ func (sa *SignalsApplication) Shutdown() {
 	// release their leases before storage closes.
 	if sa.SstpDialer != nil {
 		sa.SstpDialer.Shutdown()
+	}
+	// Stop the ping purge before storage closes; an in-flight window finishes.
+	if sa.PingPurger != nil {
+		sa.PingPurger.Stop()
 	}
 
 	// Give some time to ensure all ops are finished.
