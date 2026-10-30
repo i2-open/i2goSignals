@@ -16,7 +16,7 @@ import (
 )
 
 // redemptionFailDAO wraps the memory TokenDAO but always fails
-// RecordRedemption, to exercise the best-effort posture at /register.
+// RecordRedemption, to exercise the best-effort handling at /register.
 type redemptionFailDAO struct {
 	interfaces.TokenDAO
 }
@@ -60,7 +60,7 @@ func TestRegisterRecordsProvenance(t *testing.T) {
 }
 
 // TestRegisterRedemptionIsBestEffort proves a redemption write failure logs at
-// WARN and never blocks registration (the TrackToken posture, ADR 0007).
+// WARN and never blocks registration (the TrackToken behavior, ADR 0007).
 func TestRegisterRedemptionIsBestEffort(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
 	instance, err := createServer(t, "register_best_effort_test", true)

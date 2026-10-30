@@ -378,9 +378,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, 
 
 	// One-line record of whether this server will ever expire an event.
 	// Keep-forever is community's silent default, so without this the growth
-	// posture is invisible until the collections are already large (#291).
-	sa.logRetentionPosture()
-	sa.PingPurger.LogPosture()
+	// is invisible until the collections are already large (#291).
+	sa.logRetentionSummary()
+	sa.PingPurger.LogCleanupSchedule()
 
 	// Start background sync for clustering
 	go sa.backgroundSync()
@@ -397,8 +397,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, 
 	return sa
 }
 
-// logRetentionPosture emits the startup record of this server's event-retention
-// posture at INFO — a steady-state operational fact per the CONTEXT.md log-level
+// logRetentionSummary emits the startup record of this server's event-retention
+// summary at INFO — a steady-state operational fact per the CONTEXT.md log-level
 // policy, not a warning: keep-forever is INTENTIONAL in community (ADR 0055
 // decision 3), it is merely silent. Two independent things keep it silent — the
 // default resolver returns a window only when a per-stream override was set, and
@@ -409,8 +409,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, 
 // Cost is one extra StreamDAO.List at startup — the same query InitializeReceivers
 // just ran, not shared with it because that call holds sa.mu and keeps its map.
 // A store error is swallowed by GetStateMap (which returns nil and logs); a nil
-// or empty map summarizes to the zero posture, so this can never fail startup.
-func (sa *SignalsApplication) logRetentionPosture() {
+// or empty map yields the zero-value RetentionSummary, so this can never fail
+// startup.
+func (sa *SignalsApplication) logRetentionSummary() {
 	states := sa.StreamService.GetStateMap(context.Background())
 
 	streams := make([]model.StreamStateRecord, 0, len(states))
@@ -418,11 +419,11 @@ func (sa *SignalsApplication) logRetentionPosture() {
 		streams = append(streams, state)
 	}
 
-	posture := services.SummarizeRetention(streams, services.DefaultEffectiveWindow)
-	serverLog.Info("Event retention posture: no purge engine is bound, so no event expires",
-		"streams", posture.Streams,
-		"keep_forever", posture.KeepForever,
-		"windowed", posture.Windowed,
+	summary := services.SummarizeRetention(streams, services.DefaultEffectiveWindow)
+	serverLog.Info("Event retention summary: no purge engine is bound, so no event expires",
+		"streams", summary.Streams,
+		"keep_forever", summary.KeepForever,
+		"windowed", summary.Windowed,
 		"doc", "docs/operations.md#event-retention")
 }
 

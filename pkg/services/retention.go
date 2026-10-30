@@ -29,13 +29,13 @@ func DefaultEffectiveWindow(stream *model.StreamStateRecord) *int {
 	return stream.RetentionWindowDays
 }
 
-// RetentionPosture is the startup-visible summary of whether a server's streams
+// RetentionSummary is the startup-visible summary of whether a server's streams
 // would ever expire an event. It exists because keep-forever is community's
 // SILENT default (ADR 0055 decision 3): an operator who never set a window has
 // no signal that `events` and `deliveries` grow without bound. Counts are
 // resolver-driven, so an enterprise superset that folds in a bundle default
-// reports its own posture from the same summary.
-type RetentionPosture struct {
+// reports its own counts through the same function, passing its own resolver.
+type RetentionSummary struct {
 	// Streams is every stream the summary saw.
 	Streams int
 	// KeepForever counts streams PurgeExpired would skip — no finite window.
@@ -47,25 +47,25 @@ type RetentionPosture struct {
 // SummarizeRetention classifies streams by their effective retention window,
 // resolved through window (nil defaults to DefaultEffectiveWindow, exactly as
 // PurgeExpired does). It applies the SAME keep-forever rule as the purge pass —
-// nil or non-positive — so the reported posture can never claim an expiry the
+// nil or non-positive — so the reported summary can never claim an expiry the
 // engine would not perform. It is a pure count over an already-loaded stream
 // set: no store access, no allocation per stream, safe to call on the startup
 // path with a nil or empty slice.
-func SummarizeRetention(streams []model.StreamStateRecord, window EffectiveWindowFunc) RetentionPosture {
+func SummarizeRetention(streams []model.StreamStateRecord, window EffectiveWindowFunc) RetentionSummary {
 	if window == nil {
 		window = DefaultEffectiveWindow
 	}
 
-	posture := RetentionPosture{Streams: len(streams)}
+	summary := RetentionSummary{Streams: len(streams)}
 	for i := range streams {
 		days := window(&streams[i])
 		if days == nil || *days <= 0 {
-			posture.KeepForever++
+			summary.KeepForever++
 			continue
 		}
-		posture.Windowed++
+		summary.Windowed++
 	}
-	return posture
+	return summary
 }
 
 // OccupancySample is one daily per-stream retained-occupancy observation — the

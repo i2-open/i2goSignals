@@ -267,9 +267,9 @@ func TestSummarizeRetention_ClassifiesLikePurge(t *testing.T) {
 
 	got := SummarizeRetention(streams, DefaultEffectiveWindow)
 
-	want := RetentionPosture{Streams: 4, KeepForever: 3, Windowed: 1}
+	want := RetentionSummary{Streams: 4, KeepForever: 3, Windowed: 1}
 	if got != want {
-		t.Fatalf("posture = %+v, want %+v", got, want)
+		t.Fatalf("summary = %+v, want %+v", got, want)
 	}
 }
 
@@ -277,16 +277,16 @@ func TestSummarizeRetention_ClassifiesLikePurge(t *testing.T) {
 // yet, and a nil resolver falling back to the community default. Neither may
 // panic — this runs on the startup path.
 func TestSummarizeRetention_EmptyAndNil(t *testing.T) {
-	if got := SummarizeRetention(nil, nil); (got != RetentionPosture{}) {
-		t.Fatalf("nil streams: posture = %+v, want zero value", got)
+	if got := SummarizeRetention(nil, nil); (got != RetentionSummary{}) {
+		t.Fatalf("nil streams: summary = %+v, want zero value", got)
 	}
 
 	// A nil resolver must default to DefaultEffectiveWindow, not keep-forever
 	// for everything, so the summary tracks whatever the purge pass would do.
 	got := SummarizeRetention([]model.StreamStateRecord{streamWithWindow(days(7))}, nil)
-	want := RetentionPosture{Streams: 1, KeepForever: 0, Windowed: 1}
+	want := RetentionSummary{Streams: 1, KeepForever: 0, Windowed: 1}
 	if got != want {
-		t.Fatalf("nil window func: posture = %+v, want %+v", got, want)
+		t.Fatalf("nil window func: summary = %+v, want %+v", got, want)
 	}
 }
 
@@ -306,8 +306,8 @@ func TestSummarizeRetention_HonorsCustomResolver(t *testing.T) {
 		streamWithWindow(days(30)),
 	}, withBundleDefault)
 
-	want := RetentionPosture{Streams: 2, KeepForever: 0, Windowed: 2}
+	want := RetentionSummary{Streams: 2, KeepForever: 0, Windowed: 2}
 	if got != want {
-		t.Fatalf("posture = %+v, want %+v", got, want)
+		t.Fatalf("summary = %+v, want %+v", got, want)
 	}
 }

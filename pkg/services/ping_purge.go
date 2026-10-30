@@ -140,9 +140,9 @@ func NewPingPurger(eventDAO interfaces.EventDAO, coord PingPurgeCoordinator, nod
 	return &PingPurger{eventDAO: eventDAO, coord: coord, nodeID: nodeID, opts: opts}
 }
 
-// LogPosture logs the purge posture in one INFO line, beside the server's
-// retention-posture line.
-func (p *PingPurger) LogPosture() {
+// LogCleanupSchedule logs the ping cleanup settings in one INFO line, beside
+// the server's retention summary line.
+func (p *PingPurger) LogCleanupSchedule() {
 	if p.opts.Retention == 0 {
 		pingLog.Info("ping purge off (I2SIG_PING_RETENTION=0)", "doc", "docs/operations.md#event-retention")
 		return

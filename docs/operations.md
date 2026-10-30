@@ -488,7 +488,7 @@ received from a peer. Pings are diagnostic, so they are not kept forever.
   index or the `events` ping index, never a collection scan.
 - **Turning it off.** `I2SIG_PING_RETENTION=0`. An unparseable or negative
   value logs a `WARN` and uses `24h`.
-- **What it logs.** At startup, beside the event-retention posture line:
+- **What it logs.** At startup, beside the event-retention summary line:
 
     ```
     level=INFO msg="ping retention 24h; purge every 6h, one node per cluster" component=PING-PURGE
@@ -581,11 +581,11 @@ knob, is the subject of planning issue
 - **Size for unbounded growth.** Capacity-plan the MongoDB volume against
   `events` + `deliveredEvents` at your steady-state ingest rate, and alarm on
   volume utilisation rather than on document counts.
-- **Check the startup line.** Every server logs its retention posture once at
+- **Check the startup line.** Every server logs its retention summary once at
   startup, at `INFO`:
 
     ```
-    level=INFO msg="Event retention posture: no purge engine is bound, so no event expires"
+    level=INFO msg="Event retention summary: no purge engine is bound, so no event expires"
         streams=12 keep_forever=12 windowed=0 doc=docs/operations.md#event-retention
     ```
 

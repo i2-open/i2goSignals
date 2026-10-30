@@ -58,7 +58,7 @@ type Deps = internalrouter.RouterDeps
 // exposes the exported fields an embedder needs — StreamService, KeyService,
 // EventService and Coordinator for Deps, plus the Storage handle to Close on
 // shutdown. (Returning the internal Persistence type in an exported signature
-// matches the repo's existing posture: pkg/goSsfServer.NewApplication already
+// matches the repo's existing convention: pkg/goSsfServer.NewApplication already
 // accepts *dbProviders.Persistence; an external module consumes it via :=
 // inference + exported-field access.)
 //

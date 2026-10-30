@@ -201,29 +201,29 @@ func TestPingRetentionFromEnv(t *testing.T) {
 	}
 }
 
-func TestPingPurger_LogPosture(t *testing.T) {
+func TestPingPurger_LogCleanupSchedule(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		buf := captureLog(t)
-		NewPingPurger(memory.NewEventDAO(), nil, "n1", PingPurgeOptions{Retention: DefaultPingRetention}).LogPosture()
+		NewPingPurger(memory.NewEventDAO(), nil, "n1", PingPurgeOptions{Retention: DefaultPingRetention}).LogCleanupSchedule()
 		for _, want := range []string{"ping purge on, one node per cluster", "retention=24h", "interval=6h"} {
 			if !strings.Contains(buf.String(), want) {
-				t.Fatalf("posture line missing %q; log:\n%s", want, buf.String())
+				t.Fatalf("cleanup-settings line missing %q; log:\n%s", want, buf.String())
 			}
 		}
 	})
 	t.Run("off", func(t *testing.T) {
 		buf := captureLog(t)
-		NewPingPurger(memory.NewEventDAO(), nil, "n1", PingPurgeOptions{}).LogPosture()
+		NewPingPurger(memory.NewEventDAO(), nil, "n1", PingPurgeOptions{}).LogCleanupSchedule()
 		if !strings.Contains(buf.String(), "ping purge off (I2SIG_PING_RETENTION=0)") {
-			t.Fatalf("off posture line missing; log:\n%s", buf.String())
+			t.Fatalf("cleanup-off line missing; log:\n%s", buf.String())
 		}
 	})
 	t.Run("no event store", func(t *testing.T) {
 		buf := captureLog(t)
 		p := NewPingPurger(nil, nil, "n1", PingPurgeOptions{Retention: DefaultPingRetention})
-		p.LogPosture()
+		p.LogCleanupSchedule()
 		if !strings.Contains(buf.String(), "ping purge off (I2SIG_PING_RETENTION=0)") {
-			t.Fatalf("no event store should log the off posture; log:\n%s", buf.String())
+			t.Fatalf("no event store should log the cleanup-off line; log:\n%s", buf.String())
 		}
 		if sum, err := p.RunOnce(context.Background()); err != nil || sum.Ran {
 			t.Fatalf("RunOnce without an event store = %+v, %v; want no run", sum, err)
