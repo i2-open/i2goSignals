@@ -60,7 +60,7 @@ func TestRegisterRecordsProvenance(t *testing.T) {
 }
 
 // TestRegisterRedemptionIsBestEffort proves a redemption write failure logs at
-// WARN and never blocks registration (the TrackToken behaviour, ADR 0007).
+// WARN and never blocks registration (the TrackToken behavior, ADR 0007).
 func TestRegisterRedemptionIsBestEffort(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
 	instance, err := createServer(t, "register_best_effort_test", true)

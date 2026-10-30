@@ -409,7 +409,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, 
 // Cost is one extra StreamDAO.List at startup — the same query InitializeReceivers
 // just ran, not shared with it because that call holds sa.mu and keeps its map.
 // A store error is swallowed by GetStateMap (which returns nil and logs); a nil
-// or empty map summarizes to the empty summary, so this can never fail startup.
+// or empty map yields the zero-value RetentionSummary, so this can never fail
+// startup.
 func (sa *SignalsApplication) logRetentionSummary() {
 	states := sa.StreamService.GetStateMap(context.Background())
 

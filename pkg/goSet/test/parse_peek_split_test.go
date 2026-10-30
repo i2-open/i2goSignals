@@ -32,7 +32,8 @@ import (
 
 // newSignedSetForSplitTests produces a small signed SET wire string plus the
 // JWKS a verifier would need to accept it. Uses RS256 to match the signing
-// algorithm production uses. Returned separately so tests can wire them in different orders.
+// algorithm production uses. Returned separately so tests can wire them in
+// different orders.
 func newSignedSetForSplitTests(t *testing.T) (signedString string, jwks *keyfunc.JWKS, kid string) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)

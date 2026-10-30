@@ -34,7 +34,7 @@ func DefaultEffectiveWindow(stream *model.StreamStateRecord) *int {
 // SILENT default (ADR 0055 decision 3): an operator who never set a window has
 // no signal that `events` and `deliveries` grow without bound. Counts are
 // resolver-driven, so an enterprise superset that folds in a bundle default
-// reports its own summary from the same summary.
+// reports its own counts through the same function, passing its own resolver.
 type RetentionSummary struct {
 	// Streams is every stream the summary saw.
 	Streams int
