@@ -38,7 +38,7 @@ func TestNewJwksFromKeys_EachKeyVerifiesOnlyItsOwnAlg(t *testing.T) {
 	pqKey, err := mldsa.GenerateKey()
 	require.NoError(t, err)
 
-	var jwks *goSet.JWKS = goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{
 		"rsa-1": {Key: &rsaKey.PublicKey, Alg: "RS256"},
 		"ec-1":  {Key: &ecKey.PublicKey, Alg: "ES256"},
 		"pq-1":  {Key: pqKey.PublicKey(), Alg: mldsa.Alg},
@@ -155,7 +155,7 @@ func TestFetchJwks_UnknownKidRefreshPicksUpRotatedRSAAndAKPKeys(t *testing.T) {
 }
 
 func TestFetchJwks_UnknownKidRefreshIsRateLimited(t *testing.T) {
-	gen1, gen2 := newIssuerKeys(t, "1"), newIssuerKeys(t, "2")
+	gen1, gen2, gen3 := newIssuerKeys(t, "1"), newIssuerKeys(t, "2"), newIssuerKeys(t, "3")
 	issuer := &rotatingIssuer{}
 	issuer.serve(gen1.jwks(t))
 	srv := httptest.NewServer(issuer)
@@ -166,15 +166,72 @@ func TestFetchJwks_UnknownKidRefreshIsRateLimited(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer jwks.Close()
-	issuer.serve(gen2.jwks(t))
 
+	// A rotation just after the initial load is still picked up: the initial
+	// fetch does not start the rate-limit window (keyfunc/v2 parity).
+	issuer.serve(gen2.jwks(t))
+	_, err = goSet.Parse(signSET(t, jwt.SigningMethodRS256, gen2.rsa, gen2.rsaKid), jwks)
+	require.NoError(t, err, "the first unknown kid after load must refresh")
+
+	issuer.serve(gen3.jwks(t))
 	for i := 0; i < 5; i++ {
-		_, err = goSet.Parse(signSET(t, jwt.SigningMethodRS256, gen2.rsa, gen2.rsaKid), jwks)
+		_, err = goSet.Parse(signSET(t, jwt.SigningMethodRS256, gen3.rsa, gen3.rsaKid), jwks)
 		assert.Error(t, err)
 	}
 	issuer.mu.Lock()
 	defer issuer.mu.Unlock()
-	assert.Equal(t, 1, issuer.hits, "a flood of unknown kids must not become a flood of fetches")
+	assert.Equal(t, 2, issuer.hits, "a flood of unknown kids inside the window must not become a flood of fetches")
+}
+
+func TestFetchJwks_FetchedSetVerifiesES256(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ecJSON, err := json.Marshal(map[string]string{
+		"kty": "EC", "crv": "P-256", "kid": "ec-1", "alg": "ES256",
+		"x": base64.RawURLEncoding.EncodeToString(ecKey.PublicKey.X.FillBytes(make([]byte, 32))),
+		"y": base64.RawURLEncoding.EncodeToString(ecKey.PublicKey.Y.FillBytes(make([]byte, 32))),
+	})
+	require.NoError(t, err)
+	doc, err := json.Marshal(map[string]any{"keys": []json.RawMessage{ecJSON}})
+	require.NoError(t, err)
+
+	issuer := &rotatingIssuer{}
+	issuer.serve(doc)
+	srv := httptest.NewServer(issuer)
+	defer srv.Close()
+	jwks, err := goSet.FetchJwks(srv.URL, goSet.JwksOptions{Client: srv.Client(), RefreshInterval: -1})
+	require.NoError(t, err)
+	defer jwks.Close()
+
+	_, err = goSet.Parse(signSET(t, jwt.SigningMethodES256, ecKey, "ec-1"), jwks)
+	assert.NoError(t, err)
+}
+
+func TestFetchJwks_TokenWithoutKidDoesNotRefresh(t *testing.T) {
+	gen1 := newIssuerKeys(t, "1")
+	akp, err := mldsa.NewAKPPublicKey(gen1.pqKid, gen1.pq.PublicKey())
+	require.NoError(t, err)
+	akpJSON, err := json.Marshal(akp)
+	require.NoError(t, err)
+	// AKP keys only: no classic store, the case that used to refresh.
+	pqOnly, err := json.Marshal(map[string]any{"keys": []json.RawMessage{akpJSON}})
+	require.NoError(t, err)
+
+	issuer := &rotatingIssuer{}
+	issuer.serve(pqOnly)
+	srv := httptest.NewServer(issuer)
+	defer srv.Close()
+	jwks, err := goSet.FetchJwks(srv.URL, goSet.JwksOptions{
+		Client: srv.Client(), RefreshInterval: -1, RefreshRateLimit: time.Nanosecond,
+	})
+	require.NoError(t, err)
+	defer jwks.Close()
+
+	_, err = goSet.Parse(signSET(t, jwt.SigningMethodRS256, gen1.rsa, ""), jwks)
+	assert.Error(t, err)
+	issuer.mu.Lock()
+	defer issuer.mu.Unlock()
+	assert.Equal(t, 1, issuer.hits, "a token with no kid names no key a refresh could find")
 }
 
 func TestFetchJwks_BackgroundRefreshPicksUpRotation(t *testing.T) {

@@ -8,6 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -15,12 +22,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"net/http"
-	"os"
-	"slices"
-	"strings"
-	"sync"
-	"time"
 )
 
 const AuthContextKey = "AuthContext"

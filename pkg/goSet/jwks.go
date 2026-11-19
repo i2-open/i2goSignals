@@ -71,7 +71,10 @@ func NewJwksFromKeys(keys map[string]VerificationKey) *JWKS {
 // error if the set has no key for the token's kid and alg.
 func (j *JWKS) Keyfunc(token *jwt.Token) (any, error) {
 	key, err := j.lookup(token)
-	if errors.Is(err, ErrKIDNotFound) && j.remote != nil && j.remote.refreshForUnknownKID() {
+	// A token with no kid names no key a refresh could find, so only a named
+	// kid triggers one.
+	kid, _ := token.Header["kid"].(string)
+	if kid != "" && errors.Is(err, ErrKIDNotFound) && j.remote != nil && j.remote.refreshForUnknownKID() {
 		key, err = j.lookup(token)
 	}
 	return key, err

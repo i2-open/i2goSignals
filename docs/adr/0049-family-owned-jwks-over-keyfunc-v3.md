@@ -43,14 +43,21 @@ idempotent, and does nothing on a static set.
 - **Classic:** the RSA and EC keys, held in a jwkset `MemoryStorage` behind a
   keyfunc v3 `Keyfunc`.
 
-A refresh parses the fetched document once and swaps both parts under one
-lock, so an AKP key rotates exactly like an RSA key. This replaces ADR 0034
+A refresh builds both parts from one fetched document and swaps them under
+one lock, so an AKP key rotates exactly like an RSA key. This replaces ADR 0034
 §4's "given keys merged back in on every refresh".
 
 **3. goSet owns the fetch loop, not jwkset.** `FetchJwks` requires a
 successful first fetch, then runs a ticker at `RefreshInterval` (default 1h).
-It also refreshes on an unknown kid, at most once per `RefreshRateLimit`
-(default 5m; `authSupport` uses 1s for issue #115). The rules:
+It also refreshes when a token names a kid the set does not hold, at most
+once per `RefreshRateLimit` (default 5m; `authSupport` uses 1s for issue
+#115). The rules:
+- Only an unknown-kid refresh starts the rate-limit window. As under v2, the
+  first unknown kid after the initial load is fetched at once.
+- A token with no `kid` never triggers a refresh.
+- A kid that misses inside the window is not queued, unlike v2's deferred
+  refresh. The background tick, or the first miss after the window, picks
+  it up.
 - The body is capped at 1 MiB.
 - A response other than 200 is an error.
 - A failed refresh keeps the previous keys and reports through
@@ -70,9 +77,11 @@ count.
 separately and an unusable one is logged and skipped. jwkset's whole-set
 parse would cost a receiver every key because of one bad entry.
 
-**6. The not-found error keeps the v2 wording.** `ErrKIDNotFound` reads "the
-given key ID was not found in the JWKS". Error classifiers and tests match on
-"key ID".
+**6. The not-found error keeps the v2 phrase.** `ErrKIDNotFound` reads
+"goSet: the given key ID was not found in the JWKS", and a lookup wraps it
+with the kid (`: "rsa-2"`). The text is not byte-identical to v2's, so match
+with `errors.Is`. The classifiers that match the substring "key ID" still
+work.
 
 ## Consequences
 
@@ -95,8 +104,11 @@ given key ID was not found in the JWKS". Error classifiers and tests match on
   - `AKPGivenKeys` becomes `AKPKeys`;
   - `EndBackground` becomes `Close`.
 - An unknown-kid refresh runs on the caller's goroutine and is bounded by
-  `RefreshTimeout`. Under v2 it was queued to the background loop. The
-  rate limit keeps a burst of unknown kids to one fetch.
+  `RefreshTimeout` (default 60s). Fetches are serialized, so other
+  unknown-kid lookups on the same set wait for an in-flight fetch.
+  Known-kid lookups never wait. Under v2 the refresh was queued to the
+  background loop. The rate limit keeps a burst of unknown kids to one
+  fetch.
 
 ## Related
 

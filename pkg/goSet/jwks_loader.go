@@ -83,7 +83,7 @@ type jwksRemote struct {
 	closeOnce sync.Once
 
 	refreshMu   sync.Mutex // serializes fetches
-	lastAttempt time.Time
+	lastAttempt time.Time  // last unknown-kid refresh; guarded by refreshMu
 }
 
 func (r *jwksRemote) refresh() error {
@@ -93,7 +93,6 @@ func (r *jwksRemote) refresh() error {
 }
 
 func (r *jwksRemote) refreshLocked() error {
-	r.lastAttempt = time.Now()
 	ctx, cancel := context.WithTimeout(r.ctx, r.opts.RefreshTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
@@ -123,8 +122,12 @@ func (r *jwksRemote) refreshLocked() error {
 	return nil
 }
 
-// refreshForUnknownKID refreshes unless one was attempted within the rate
-// limit, and reports whether the keys were refreshed.
+// refreshForUnknownKID refreshes unless an unknown-kid refresh was attempted
+// within the rate limit, and reports whether the keys were refreshed. Only
+// unknown-kid refreshes start the window: as under keyfunc/v2, the first unknown
+// kid after the initial load (or after a background refresh) is fetched at once.
+// A kid that misses inside the window is not queued for later; the background
+// refresh, or the next miss after the window, picks it up.
 func (r *jwksRemote) refreshForUnknownKID() bool {
 	if r.ctx.Err() != nil {
 		return false
@@ -134,6 +137,7 @@ func (r *jwksRemote) refreshForUnknownKID() bool {
 	if time.Since(r.lastAttempt) < r.opts.RefreshRateLimit {
 		return false
 	}
+	r.lastAttempt = time.Now()
 	if err := r.refreshLocked(); err != nil {
 		r.opts.OnRefreshError(err)
 		return false
@@ -183,12 +187,7 @@ func GetJwksWithClient(jwksUrl string, client *http.Client) (*JWKS, error) {
 		client = spiffeJwksClient()
 	}
 	jwksLog.Info("Loading JWKS", "url", jwksUrl)
-	return FetchJwks(jwksUrl, JwksOptions{
-		Client:           client,
-		RefreshInterval:  time.Hour,
-		RefreshRateLimit: 5 * time.Minute,
-		RefreshTimeout:   60 * time.Second,
-	})
+	return FetchJwks(jwksUrl, JwksOptions{Client: client}) // default refresh settings
 }
 
 // spiffeJwksClient returns a client on the SPIFFE resilient transport, which
