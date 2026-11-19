@@ -444,10 +444,12 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 	t := suite.T()
 
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	numPollers := 3
 
 	for i := 0; i < numPollers; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func(index int) {
 			defer wg.Done()
 
@@ -462,7 +464,10 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 			req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 			req.Header.Set("Content-Type", "application/json")
 
+			// Record start before signalling ready, so every poller's clock
+			// begins before the main goroutine's pre-event sleep.
 			start := time.Now()
+			ready.Done()
 			resp, err := suite.instance.client.Do(req)
 			elapsed := time.Since(start)
 
@@ -474,7 +479,8 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 		}(i)
 	}
 
-	// Wait a bit, then generate an event
+	// Wait until all pollers have started their clocks, wait a bit, then generate an event
+	ready.Wait()
 	time.Sleep(500 * time.Millisecond)
 
 	subject := &goSet.EventSubject{
