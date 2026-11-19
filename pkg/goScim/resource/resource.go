@@ -3,7 +3,7 @@ package resource
 import (
 	"time"
 
-	"github.com/brianvoe/gofakeit/v6"
+	"github.com/brianvoe/gofakeit/v7"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 )
 
@@ -70,7 +70,7 @@ func GenerateFakeUser(basePath string) ScimResource {
 				},
 			},
 			DisplayName: person.FirstName + " " + person.LastName,
-			ProfileUrl:  person.Image,
+			ProfileUrl:  gofakeit.URL(),
 		},
 
 		Extensions: nil,
