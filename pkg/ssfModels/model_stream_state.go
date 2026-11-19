@@ -2,13 +2,11 @@ package model
 
 import (
 	"fmt"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // RemoteIP holds the network address details of a remote peer on a stream connection.
@@ -78,7 +76,7 @@ type StreamStateRecord struct {
 	Status string `json:"status" bson:"status" json:"status,omitempty"`
 
 	// ValidateJwks is used when in Inbound mode to validate the inbound issuer. This value acts like a cache
-	ValidateJwks *keyfunc.JWKS `json:"-" bson:"-" json:"validateJwks,omitempty"` // not persisted
+	ValidateJwks *goSet.JWKS `json:"-" bson:"-" json:"validateJwks,omitempty"` // not persisted
 
 	// ErrorMsg holds the reason a stream has been paused
 	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty" json:"errorMsg,omitempty"`

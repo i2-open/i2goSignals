@@ -5,17 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func generateTestKey(t *testing.T) *rsa.PrivateKey {
@@ -290,10 +288,10 @@ func TestPoll_WithValidSETs(t *testing.T) {
 
 // jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"
 // goSet.JWS emits when SecurityEventToken.Kid is empty (it falls back to iss).
-func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *keyfunc.JWKS {
+func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *goSet.JWKS {
 	t.Helper()
-	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
-	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{issuer: givenKey})
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey}
+	return goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{issuer: givenKey})
 }
 
 // --- Signing-only poll posture (#184): RequireSignature ---

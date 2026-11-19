@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -59,10 +59,10 @@ var errDirectionNotEnabled = errors.New("receive direction is not enabled")
 // jwksIsUsable reports whether a resolved JWKS actually carries key material.
 // Non-nil is NOT the test: keyService.GetPublicJWKS swallows every per-key
 // error with a continue and returns whatever accumulated, so a total failure
-// yields {"keys":[]} — which keyfunc.NewJSON parses into a non-nil, zero-key
+// yields {"keys":[]} — which goSet.NewJwksWithAKP parses into a non-nil, zero-key
 // JWKS with a nil error. A JWKS that parses but carries zero keys is
 // unresolved, not resolved (ADR 0033).
-func jwksIsUsable(jwks *keyfunc.JWKS) bool {
+func jwksIsUsable(jwks *goSet.JWKS) bool {
 	return jwks != nil && jwks.Len() > 0
 }
 
@@ -91,7 +91,7 @@ type receiverCacheEntry struct {
 
 	// jwks is the verification material handed to callers. It is only ever set
 	// to a usable (non-nil, non-empty) value on a direction that expects one.
-	jwks *keyfunc.JWKS
+	jwks *goSet.JWKS
 
 	// permanent records that the last attempt failed with an error
 	// isPermanentJwksError classifies as permanent. That path has already
@@ -148,26 +148,25 @@ func (e *receiverCacheEntry) resetRetryLadder() {
 	e.nextRetry = time.Time{}
 }
 
-// endJwksBackground stops the keyfunc background refresh goroutine behind jwks,
-// if there is one. keyfunc.Get starts that goroutine bound to
-// context.Background() for every JWKS loaded from a URL, and the loader in
-// pkg/goSet sets RefreshInterval, so every URL-sourced JWKS this service holds
-// carries one. Nothing in keyfunc ever ends it on its own: the reference that
-// dropped the JWKS is the only thing that can (GH #290).
+// endJwksBackground stops the background refresh goroutine behind jwks, if
+// there is one. goSet.FetchJwks starts that goroutine for every JWKS loaded from
+// a URL with a positive RefreshInterval, which GetJwks always sets, so every
+// URL-sourced JWKS this service holds carries one. Nothing ends it on its own:
+// the reference that dropped the JWKS is the only thing that can (GH #290).
 //
 // It is safe on nil, safe to call twice (the cancel func is idempotent), and a
-// no-op on a JWKS built by keyfunc.NewJSON — the internal-issuer branch of
-// fetchReceiverJwks — whose cancel is nil because it never had a refresher.
+// no-op on a JWKS built by goSet.NewJwksWithAKP — the internal-issuer branch of
+// fetchReceiverJwks — which is static and never had a refresher.
 //
-// Ending the refresher does NOT invalidate the keys: EndBackground cancels only
+// Ending the refresher does NOT invalidate the keys: Close cancels only
 // the refresh loop, so a caller still verifying a SET against the discarded set
 // keeps working and simply stops seeing rotations for a set nothing will
 // consult again.
-func endJwksBackground(jwks *keyfunc.JWKS) {
+func endJwksBackground(jwks *goSet.JWKS) {
 	if jwks == nil {
 		return
 	}
-	jwks.EndBackground()
+	jwks.Close()
 }
 
 // setJwks installs jwks as this entry's verification material, ending the
@@ -175,7 +174,7 @@ func endJwksBackground(jwks *keyfunc.JWKS) {
 // a bare assignment drops the previous JWKS on the floor with its refresher
 // still running, which is the per-entry half of GH #290 (the map-rebuild half
 // is in LoadReceiverStreams).
-func (e *receiverCacheEntry) setJwks(jwks *keyfunc.JWKS) {
+func (e *receiverCacheEntry) setJwks(jwks *goSet.JWKS) {
 	if e.jwks != jwks {
 		endJwksBackground(e.jwks)
 	}
@@ -198,7 +197,7 @@ func (e *receiverCacheEntry) endBackground() {
 
 // recordAttempt folds the outcome of one resolution attempt into the entry and,
 // on a retryable failure, schedules the next attempt with exponential backoff.
-func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, err error) {
+func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *goSet.JWKS, err error) {
 	if !e.expectsJwks() {
 		// No URL configured: a valid resting state. The internal key lookup is
 		// authoritative and its result — including "no key at all" — is

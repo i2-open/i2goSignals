@@ -4,10 +4,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
-	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"testing"
 )
 
 // Benchmarks for the pkg/goSet hot path: SET construction, JSON
@@ -61,14 +59,14 @@ func benchSet() *SecurityEventToken {
 }
 
 // benchSigned returns a signed wire token plus a JWKS that verifies it.
-func benchSigned(b *testing.B) (string, *keyfunc.JWKS) {
+func benchSigned(b *testing.B) (string, *JWKS) {
 	b.Helper()
 	token, err := benchSet().JWS(jwt.SigningMethodRS256, benchKey)
 	if err != nil {
 		b.Fatalf("JWS: %v", err)
 	}
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
-		benchIssuer: keyfunc.NewGivenRSA(&benchKey.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"}),
+	jwks := NewJwksFromKeys(map[string]VerificationKey{
+		benchIssuer: VerificationKey{Key: &benchKey.PublicKey, Alg: "RS256"},
 	})
 	return token, jwks
 }

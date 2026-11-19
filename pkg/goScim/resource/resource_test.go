@@ -6,7 +6,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 
-	"github.com/brianvoe/gofakeit/v6"
+	"github.com/brianvoe/gofakeit/v7"
 )
 
 func TestUserResource(t *testing.T) {
@@ -20,7 +20,6 @@ func TestUserResource(t *testing.T) {
 	fmt.Println(person.LastName)
 	fmt.Println(person.Gender)
 	fmt.Println(person.SSN)
-	fmt.Println(person.Image)
 	fmt.Println(person.Hobby)
 
 	fmt.Println(job.Company)

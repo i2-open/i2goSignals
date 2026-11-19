@@ -20,7 +20,6 @@ var productionImportAllowlist = map[string]bool{
 	"github.com/i2-open/i2goSignals/pkg/goSet":        true,
 	"github.com/i2-open/i2goSignals/pkg/goSet/events": true,
 	"github.com/i2-open/i2goSignals/pkg/subjectid":    true,
-	"github.com/MicahParks/keyfunc/v2":                true,
 }
 
 // testOnlyImportAllowlist adds the fixtures the unit tests need. Test files are

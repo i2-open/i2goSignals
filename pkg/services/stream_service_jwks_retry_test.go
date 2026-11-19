@@ -160,7 +160,7 @@ func TestJwksRetryBackoff_DoublesFromTenSecondsAndCapsAtFiveMinutes(t *testing.T
 // TestGetIssuerJwksForReceiver_ZeroKeyJwksIsUnresolved: a JWKS that parses but
 // carries zero keys is unresolved, NOT resolved. Non-nil is not the test —
 // keyService.GetPublicJWKS swallows per-key errors and can return {"keys":[]},
-// which keyfunc parses into a non-nil, zero-key JWKS with a nil error. Caching
+// which goSet.NewJwksWithAKP parses into a non-nil, zero-key JWKS with a nil error. Caching
 // that as success would leave the stream unable to verify anything with nothing
 // scheduled to fix it (ADR 0033).
 func TestGetIssuerJwksForReceiver_ZeroKeyJwksIsUnresolved(t *testing.T) {
@@ -256,7 +256,7 @@ func TestGetIssuerJwksForReceiver_NoJwksUrlIsNeverUnresolved(t *testing.T) {
 
 		// The internal key lookup is authoritative here. GetPublicJWKS swallows
 		// per-key errors and returns {"keys":[]} rather than nil for an issuer it
-		// has no key for, which keyfunc parses into a non-nil, zero-key JWKS.
+		// has no key for, which goSet.NewJwksWithAKP parses into a non-nil, zero-key JWKS.
 		// ADR 0033 leaves that swallow in place deliberately: it lands on this
 		// branch, which by design never retries, and the zero-key predicate
 		// covers the URL branch where it would matter. Pinned so the carve-out

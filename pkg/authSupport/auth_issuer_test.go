@@ -7,6 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,13 +20,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"github.com/stretchr/testify/assert"
 )
 
 // TestAuthContext_HasScope locks the shape-aware scope predicate that the
@@ -181,15 +179,13 @@ func initMockIssuer() *AuthIssuer {
 	}
 
 	publicKey := privateKey.PublicKey
-	givenKey := keyfunc.NewGivenRSA(&publicKey, keyfunc.GivenKeyOptions{
-		Algorithm: "RS256",
-	})
-	givenKeys := make(map[string]keyfunc.GivenKey)
+	givenKey := goSet.VerificationKey{Key: &publicKey, Alg: "RS256"}
+	givenKeys := make(map[string]goSet.VerificationKey)
 	givenKeys["tester"] = givenKey
 
 	return &AuthIssuer{
 		TokenIssuer: "tester",
-		PublicKey:   keyfunc.NewGiven(givenKeys),
+		PublicKey:   goSet.NewJwksFromKeys(givenKeys),
 		PrivateKey:  privateKey,
 	}
 }
@@ -1179,7 +1175,7 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 }
 
 // TestValidateAuthorizationAny_WaitsForJWKSRefresh is a regression test for issue #115.
-// When keyfunc reports an unknown kid, validateOAuthToken must briefly wait for the
+// When goSet.JWKS reports an unknown kid, validateOAuthToken must briefly wait for the
 // in-flight background JWKS refresh to land before returning 503. The kid becomes
 // available mid-grace; validation must observe it and return 200.
 func TestValidateAuthorizationAny_WaitsForJWKSRefresh(t *testing.T) {

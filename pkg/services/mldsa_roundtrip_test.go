@@ -17,14 +17,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
@@ -56,7 +54,7 @@ func transmit(t *testing.T, svc *KeyService, signingAlg string) string {
 
 // receiverJWKS is the receive-side trust anchor: the issuer's published JWKS,
 // loaded exactly as a receiver stream loads it.
-func receiverJWKS(t *testing.T, svc *KeyService) *keyfunc.JWKS {
+func receiverJWKS(t *testing.T, svc *KeyService) *goSet.JWKS {
 	t.Helper()
 	doc := svc.GetPublicJWKS(context.Background(), rtIssuer)
 	require.NotNil(t, doc)

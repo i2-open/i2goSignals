@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -137,8 +136,8 @@ type AuthIssuer struct {
 	TokenIssuer  string
 	TokenKid     string
 	PrivateKey   crypto.Signer
-	PublicKey    *keyfunc.JWKS
-	OAuthPubKeys []*keyfunc.JWKS
+	PublicKey    *goSet.JWKS
+	OAuthPubKeys []*goSet.JWKS
 	// OAuth Token
 	OAuthServer  []string     // OAuth Authorization Server identifiers
 	TokenTracker TokenTracker // Tracker for revocation
@@ -158,7 +157,7 @@ type AuthIssuer struct {
 // a nil *rsa.PrivateKey boxed into the interface would make IsReady report
 // ready and then panic at the first mint. KeyService.refreshTokenIssuerKey is
 // written to pass an untyped nil for exactly this reason.
-func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey crypto.Signer, publicKey *keyfunc.JWKS) {
+func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey crypto.Signer, publicKey *goSet.JWKS) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.TokenIssuer = issuer
@@ -287,7 +286,7 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 		return nil
 	}
 
-	jwksList := make([]*keyfunc.JWKS, 0, len(servers))
+	jwksList := make([]*goSet.JWKS, 0, len(servers))
 	var lastErr error
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -308,15 +307,14 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 		}
 
 		// Use background refresh and refresh on unknown KID to handle transient startup issues and key rotation
-		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{
+		jwks, err := goSet.FetchJwks(disc.JWKSURI, goSet.JwksOptions{
 			Client: client,
-			RefreshErrorHandler: func(err error) {
+			OnRefreshError: func(err error) {
 				authLog.Error("JWKS background refresh failed", "jwks_uri", disc.JWKSURI, "error", err)
 			},
-			RefreshInterval:   time.Hour,
-			RefreshRateLimit:  time.Second,
-			RefreshTimeout:    time.Second * 30,
-			RefreshUnknownKID: true,
+			RefreshInterval:  time.Hour,
+			RefreshRateLimit: time.Second,
+			RefreshTimeout:   time.Second * 30,
 		})
 		if err != nil {
 			authLog.Error("Failed to load JWKS", "jwks_uri", disc.JWKSURI, "error", err)
@@ -579,8 +577,8 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 //
 // We route by token kid so the wrong validator never runs (and never emits noisy
 // "validation failed" logs). If the kid cannot be classified (cached JWKS doesn't
-// yet contain it), we fall back to try-local-then-OAuth — keyfunc's RefreshUnknownKID
-// will pull a fresh JWKS in the OAuth path.
+// yet contain it), we fall back to try-local-then-OAuth — goSet.JWKS's
+// unknown-kid refresh will pull a fresh JWKS in the OAuth path.
 func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) (*AuthContext, int) {
 	authorization := r.Header.Get("Authorization")
 
@@ -634,8 +632,8 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 		return a.validateOAuthToken(tokenString, streamRequested, scopes)
 	default:
 		// Unclassified (no kid in token header, or kid not yet in any cached JWKS).
-		// Fall back to try-local-then-OAuth; keyfunc will refresh the OAuth JWKS on
-		// unknown kid if Keycloak rotated.
+		// Fall back to try-local-then-OAuth; goSet.JWKS will refresh the OAuth JWKS
+		// on unknown kid if Keycloak rotated.
 		if ctx, status := a.validateLocalToken(tokenString, streamRequested, scopes); status != http.StatusUnauthorized || ctx != nil {
 			return ctx, status
 		}
@@ -695,7 +693,7 @@ func (a *AuthIssuer) classifyToken(tokenString string) tokenRoute {
 	}
 
 	// Kid is not in the local JWKS. If OAuth is configured we route to OAuth so
-	// keyfunc can refresh and try; otherwise leave unclassified so caller fails fast.
+	// goSet.JWKS can refresh and try; otherwise leave unclassified so caller fails fast.
 	if out.oauthConfigured {
 		out.name = routeOAuth
 	}
@@ -860,12 +858,11 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		return ctx, http.StatusOK
 	}
 
-	// Cold-cache / key-rotation grace: keyfunc's RefreshUnknownKID kicks off a
-	// background refresh but may return ErrKIDNotFound before that refresh has
-	// landed — either via the rate-limited queue (which waits up to RefreshRateLimit
-	// = 1s before running) or the refreshRequests channel filling under concurrent
-	// unknown-kid requests. Poll past the rate-limit window and re-attempt validation
-	// before failing. Genuinely-unavailable JWKS still surface 503 after the grace.
+	// Cold-cache / key-rotation grace: goSet.JWKS refreshes on an unknown kid at
+	// most once per RefreshRateLimit (1s here), so a request that arrives inside
+	// that window — typically a concurrent request for the same newly rotated
+	// kid — gets ErrKIDNotFound without a fetch. Poll past the rate-limit window
+	// and re-attempt validation before failing. Genuinely-unavailable JWKS still surface 503 after the grace.
 	if isMissingKID && !isAuthorized {
 		deadline := time.Now().Add(1500 * time.Millisecond)
 		for time.Now().Before(deadline) {

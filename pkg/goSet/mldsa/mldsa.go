@@ -7,11 +7,11 @@
 // Neither golang-jwt/jwt/v5 nor MicahParks/keyfunc nor MicahParks/jwkset
 // understands ML-DSA or the RFC 9964 "AKP" JWK key type; the upstream
 // golang-jwt work is open (golang-jwt#508, golang-jwt#519). Everything in this
-// package is therefore deliberately shaped to be *deletable*: it plugs into the
-// two extension points those libraries already publish — jwt.RegisterSigningMethod
-// for the algorithm and keyfunc.NewGivenCustom for the key — so when upstream
-// ships, the swap is an import change at the seam and not a rewrite of the
-// signing or verification paths. See docs/adr/0034-ml-dsa-set-signing.md.
+// package is therefore deliberately shaped to be *deletable*: it plugs into
+// golang-jwt's published extension point, jwt.RegisterSigningMethod, for the
+// algorithm, and into this module's goSet.VerificationKey for the key — so when
+// upstream ships, the swap is an import change at the seam and not a rewrite of
+// the signing or verification paths. See docs/adr/0034-ml-dsa-set-signing.md.
 //
 // The signature is the thing to size before adopting this: an ML-DSA-65
 // signature is 3309 bytes against RSA-2048's 256, so every SET grows by roughly

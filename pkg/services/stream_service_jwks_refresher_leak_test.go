@@ -14,21 +14,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// keyfuncRefresherFrame is the stack frame of the goroutine keyfunc.Get starts
+// jwksRefresherFrame is the stack frame of the goroutine goSet.FetchJwks starts
 // for every JWKS it loads from a URL with a RefreshInterval set. Counting it is
 // the same measurement the GH #290 report made from goroutine profiles of the
 // dev cluster, taken here in-process instead.
-const keyfuncRefresherFrame = "github.com/MicahParks/keyfunc/v2.(*JWKS).backgroundRefresh"
+const jwksRefresherFrame = "github.com/i2-open/i2goSignals/pkg/goSet.(*jwksRemote).loop"
 
-// keyfuncRefresherCount reports how many keyfunc background refreshers are live
+// jwksRefresherCount reports how many goSet JWKS background refreshers are live
 // in this process. Only DELTAS across one test are meaningful: other tests in
 // this package load JWKS too, so the absolute number carries their residue.
-func keyfuncRefresherCount() int {
+func jwksRefresherCount() int {
 	buf := make([]byte, 1<<18)
 	for {
 		n := runtime.Stack(buf, true)
 		if n < len(buf) {
-			return bytes.Count(buf[:n], []byte(keyfuncRefresherFrame))
+			return bytes.Count(buf[:n], []byte(jwksRefresherFrame))
 		}
 		buf = make([]byte, 2*len(buf))
 	}
@@ -41,13 +41,13 @@ func keyfuncRefresherCount() int {
 func requireRefresherCount(t *testing.T, want int, what string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	got := keyfuncRefresherCount()
+	got := jwksRefresherCount()
 	for got != want && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
-		got = keyfuncRefresherCount()
+		got = jwksRefresherCount()
 	}
 	require.Equalf(t, want, got,
-		"%s: the live keyfunc refresher count never settled on the expected value", what)
+		"%s: the live JWKS refresher count never settled on the expected value", what)
 }
 
 // endAllRefreshers drops whatever this harness still holds so the count this
@@ -66,7 +66,7 @@ func endAllRefreshers(t *testing.T, svc *StreamService) {
 // TestLoadReceiverStreams_RebuildDoesNotLeakJwksRefreshers is the GH #290
 // reproduction. LoadReceiverStreams rebuilds the entire receiverStreams map and
 // newReceiverEntry loads a JWKS per entry, so before the fix every rebuild
-// started a fresh keyfunc refresher per receiver stream and abandoned the
+// started a fresh JWKS refresher per receiver stream and abandoned the
 // previous one still running: one goroutine and one hourly outbound JWKS fetch
 // per stream per rebuild, for the life of the process. The provider calls
 // LoadReceiverStreams on every (re)connect, so a reconnecting node accumulated
@@ -90,7 +90,7 @@ func TestLoadReceiverStreams_RebuildDoesNotLeakJwksRefreshers(t *testing.T) {
 		require.NoError(t, h.streamDAO.Create(ctx, rec))
 	}
 
-	baseline := keyfuncRefresherCount()
+	baseline := jwksRefresherCount()
 	h.svc.LoadReceiverStreams(ctx)
 	settled := baseline + streams
 	requireRefresherCount(t, settled, "first preload")
@@ -134,7 +134,7 @@ func TestDeleteStream_EndsTheDeletedStreamsJwksRefresherOnly(t *testing.T) {
 	survivor := newJwksReceiverFixture(t, "https://survivor.example", survivorSrv.URL)
 	require.NoError(t, h.streamDAO.Create(ctx, survivor))
 
-	baseline := keyfuncRefresherCount()
+	baseline := jwksRefresherCount()
 	h.svc.LoadReceiverStreams(ctx)
 	requireRefresherCount(t, baseline+2, "preload of two receiver streams")
 

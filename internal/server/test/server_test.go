@@ -9,14 +9,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
-	"testing"
-	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
@@ -27,6 +19,12 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -98,16 +96,16 @@ func (suite *ServerSuite) Test1_Certificate() {
 	var rawJson json.RawMessage
 	_ = rawJson.UnmarshalJSON(body)
 
-	issPub, err := keyfunc.NewJSON(rawJson)
+	issPub, err := goSet.NewJwksWithAKP(rawJson)
 	assert.NoError(suite.T(), err, "No error parsing well known issuer")
 	assert.Equal(suite.T(), "DEFAULT", issPub.KIDs()[0], "Kid is DEFAULT")
-	issPub2, err := keyfunc.Get(serverUrl, keyfunc.Options{})
+	issPub2, err := goSet.FetchJwks(serverUrl, goSet.JwksOptions{})
 	assert.NoError(suite.T(), err, "Keyfunc retrieval had no error")
 
 	assert.Equal(suite.T(), body, issPub2.RawJWKS(), "Check JWKS issuers are equal")
 
 	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT", suite.servers[0].host)
-	issPub3, err := keyfunc.Get(serverUrl, keyfunc.Options{})
+	issPub3, err := goSet.FetchJwks(serverUrl, goSet.JwksOptions{})
 	assert.NoError(suite.T(), err, "Check no error keyfunc retrieval of /jwks/issuer")
 	assert.Equal(suite.T(), body, issPub3.RawJWKS(), "Check JWKS issuers are equal")
 }
@@ -778,7 +776,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	body, _ = io.ReadAll(resp.Body)
 	var rawJson json.RawMessage
 	_ = rawJson.UnmarshalJSON(body)
-	issPub, err := keyfunc.NewJSON(rawJson)
+	issPub, err := goSet.NewJwksWithAKP(rawJson)
 	assert.NoError(suite.T(), err)
 	assert.Len(suite.T(), issPub.KIDs(), 1, "Should have 1 key initially")
 	assert.Equal(suite.T(), issuer, issPub.KIDs()[0], "Initial KID should be the issuer ID")
@@ -825,7 +823,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	assert.True(suite.T(), ok, "Should be an RSA private key")
 
 	_ = rawJson.UnmarshalJSON(body)
-	issPubUpdated, err := keyfunc.NewJSON(rawJson)
+	issPubUpdated, err := goSet.NewJwksWithAKP(rawJson)
 	assert.NoError(suite.T(), err)
 
 	assert.Contains(suite.T(), issPubUpdated.KIDs(), issuer, "Original KID should still be present")

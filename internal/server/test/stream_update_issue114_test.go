@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -36,9 +36,9 @@ func TestStreamUpdate_Issue114_AdminTokenRealProject(t *testing.T) {
 	assert.NoError(t, err)
 	n := base64.RawURLEncoding.EncodeToString(oauthPrivateKey.N.Bytes())
 	jwksJSON := []byte(fmt.Sprintf(`{"keys":[{"kty":"RSA","kid":"external","n":"%s","e":"AQAB"}]}`, n))
-	jwks, err := keyfunc.NewJSON(jwksJSON)
+	jwks, err := goSet.NewJwksWithAKP(jwksJSON)
 	assert.NoError(t, err)
-	instance.app.Auth.OAuthPubKeys = []*keyfunc.JWKS{jwks}
+	instance.app.Auth.OAuthPubKeys = []*goSet.JWKS{jwks}
 
 	claims := &authSupport.OidcClaims{
 		Scope: authSupport.ScopeStreamMgmt,

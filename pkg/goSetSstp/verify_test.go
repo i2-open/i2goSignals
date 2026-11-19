@@ -4,11 +4,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"github.com/golang-jwt/jwt/v5"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
@@ -41,14 +39,14 @@ func signTestSET(t *testing.T, iss, aud string, key *rsa.PrivateKey) string {
 	return token
 }
 
-func makeTestKeyAndJWKS(t *testing.T, kid string) (*rsa.PrivateKey, *keyfunc.JWKS) {
+func makeTestKeyAndJWKS(t *testing.T, kid string) (*rsa.PrivateKey, *goSet.JWKS) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("gen RSA: %v", err)
 	}
-	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{kid: givenKey})
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey, Alg: "RS256"}
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{kid: givenKey})
 	return key, jwks
 }
 

@@ -3,11 +3,9 @@ package goSetSstp
 import (
 	"errors"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"slices"
 	"strings"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
@@ -64,11 +62,11 @@ var defaultVerifyAlgs = []string{"RS256", "ES256", "EdDSA", mldsa.Alg}
 // stream's resolved trust state — no per-stream builder or long-lived
 // verifier object.
 type VerifyConfig struct {
-	// JWKS is the keyfunc-backed JWKS the token's signature is verified
+	// JWKS is the goSet JWKS the token's signature is verified
 	// against. When nil, verification is impossible: a call with
 	// RequireSignature=true (or with any signature-bearing token, i.e.
 	// always under ADR-0066) returns ErrBadSignature.
-	JWKS *keyfunc.JWKS
+	JWKS *goSet.JWKS
 
 	// ExpectedIssuer, when non-empty, is compared exactly to the token's
 	// "iss" claim; mismatch ⇒ ErrIssuerCertMismatch. Empty ⇒ iss is not
@@ -191,7 +189,7 @@ func VerifySET(token string, config VerifyConfig) (VerifiedSET, error) {
 	}
 	verified, err := goSet.Parse(token, config.JWKS)
 	if err != nil {
-		// goSet.Parse routes "kid not found" through keyfunc.JWKS.Keyfunc
+		// goSet.Parse routes "kid not found" through goSet.JWKS.Keyfunc
 		// as a jwt.ErrTokenSignatureInvalid-wrapped error; the pkg does
 		// not have a stable errors.Is API to distinguish "unknown kid"
 		// vs "bad sig" here, so we surface the more common case

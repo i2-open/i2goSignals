@@ -37,7 +37,7 @@ import (
 	_ "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // getHttpClient returns a standard or SPIFFE-aware HTTP client.

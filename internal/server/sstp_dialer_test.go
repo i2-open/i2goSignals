@@ -6,6 +6,9 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +18,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -1060,12 +1058,12 @@ func rsaTestKey() (*rsa.PrivateKey, error) {
 	return rsa.GenerateKey(cryptorand.Reader, 2048)
 }
 
-// makeGivenJwks builds a keyfunc.JWKS from a single RSA public key + kid so
+// makeGivenJwks builds a goSet.JWKS from a single RSA public key + kid so
 // InboundVerifyConfig can hand a real trust root to VerifySET in tests.
-func makeGivenJwks(t *testing.T, kid string, pub *rsa.PublicKey) *keyfunc.JWKS {
+func makeGivenJwks(t *testing.T, kid string, pub *rsa.PublicKey) *goSet.JWKS {
 	t.Helper()
-	given := keyfunc.NewGivenRSA(pub, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{kid: given})
+	given := goSet.VerificationKey{Key: pub, Alg: "RS256"}
+	return goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{kid: given})
 }
 
 // signResponseSet builds and RS256-signs a SecurityEventToken to stand in as

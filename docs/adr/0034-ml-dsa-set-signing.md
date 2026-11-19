@@ -9,6 +9,12 @@ Date: 2026-08-27
 
 Accepted (GH #278, planning spec #101 — Go 1.27 adoption).
 
+Amended by [ADR 0049](0049-family-owned-jwks-over-keyfunc-v3.md) (#399): §4 and
+§5 now apply to the family-owned `goSet.JWKS` over keyfunc v3, which re-parses
+AKP keys on every refresh; the keyfunc given-key API they name is gone. §5's
+alg pin holds for every AKP and in-memory key, and for a fetched RSA/EC JWK only
+when the JWK carries `alg` (as under keyfunc v2).
+
 Extended by [ADR 0041](0041-es256-set-signing.md) (community #284): `signing_alg`
 now carries a third selectable value, `ES256`, and the key store's encoding
 contract widens to a third discriminated shape. Where this ADR describes the

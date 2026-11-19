@@ -8,7 +8,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
@@ -380,7 +379,7 @@ func SigningMethodOrRS256(alg string) jwt.SigningMethod {
 //
 // The signature algorithm is checked against AllowedAlgs before key lookup, so
 // an unexpected alg (HS256, none) is refused without the JWKS being consulted.
-func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventToken, error) {
+func Parse(tokenString string, issuerPublicJwks *JWKS) (*SecurityEventToken, error) {
 	if issuerPublicJwks == nil {
 		return nil, errors.New("goSet.Parse: JWKS is required for verified parsing; use Peek for explicit unverified inspection (ADR-0066 §D3)")
 	}

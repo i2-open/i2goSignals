@@ -5,17 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // createTestSET creates a signed SET token string for testing.
@@ -35,10 +33,10 @@ func generateTestKey(t *testing.T) *rsa.PrivateKey {
 	return key
 }
 
-func createTestJWKS(t *testing.T, key *rsa.PrivateKey) *keyfunc.JWKS {
+func createTestJWKS(t *testing.T, key *rsa.PrivateKey) *goSet.JWKS {
 	t.Helper()
-	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{"test-kid": givenKey})
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey}
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{"test-kid": givenKey})
 	return jwks
 }
 
@@ -207,10 +205,10 @@ func TestParseReceivedSET_NoJWKS_AlwaysRejected(t *testing.T) {
 // jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"
 // goSet.JWS emits when SecurityEventToken.Kid is empty (it falls back to the
 // issuer). This lets a verifying parse resolve the key for a signed SET.
-func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *keyfunc.JWKS {
+func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *goSet.JWKS {
 	t.Helper()
-	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
-	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{issuer: givenKey})
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey}
+	return goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{issuer: givenKey})
 }
 
 // --- Signing-only receive posture (#184): RequireSignature ---

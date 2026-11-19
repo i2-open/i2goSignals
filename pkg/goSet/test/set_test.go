@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	model2 "github.com/i2-open/i2goSignals/pkg/ssfModels"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	model2 "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 
 	"testing"
@@ -141,11 +139,9 @@ func TestSetJws(t *testing.T) {
 
 	publicKey := privateKey.PublicKey
 
-	givenKey := keyfunc.NewGivenRSA(&publicKey, keyfunc.GivenKeyOptions{
-		Algorithm: "RS256",
-	})
+	givenKey := goSet.VerificationKey{Key: &publicKey, Alg: "RS256"}
 
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{
 		kid: givenKey,
 	})
 
@@ -197,11 +193,9 @@ func TestSetJws(t *testing.T) {
 
 	altPublicKey := altPrivateKey.PublicKey
 
-	altGivenKey := keyfunc.NewGivenRSA(&altPublicKey, keyfunc.GivenKeyOptions{
-		Algorithm: "RS256",
-	})
+	altGivenKey := goSet.VerificationKey{Key: &altPublicKey, Alg: "RS256"}
 
-	altJwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
+	altJwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{
 		"issuer": altGivenKey,
 	})
 

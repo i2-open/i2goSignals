@@ -3,11 +3,9 @@ package goSetValidate
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"testing"
 )
 
 // Benchmarks for the pkg/goSetValidate hot path: per-SET event-payload
@@ -126,8 +124,8 @@ func BenchmarkParseAndValidate(b *testing.B) {
 	if err != nil {
 		b.Fatalf("JWS: %v", err)
 	}
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
-		benchIssuer: keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"}),
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{
+		benchIssuer: goSet.VerificationKey{Key: &key.PublicKey, Alg: "RS256"},
 	})
 	vs := NewValidatorSet(SharedBuiltinRegistry(), []string{scimCreateFullEventUri})
 

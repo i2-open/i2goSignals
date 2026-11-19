@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -32,11 +32,11 @@ func TestStreamUpdate_ExternalToken(t *testing.T) {
 	// 2. Create a JWKS for this key
 	n := base64.RawURLEncoding.EncodeToString(oauthPrivateKey.N.Bytes())
 	jwksJSON := []byte(fmt.Sprintf(`{"keys":[{"kty":"RSA","kid":"external","n":"%s","e":"AQAB"}]}`, n))
-	jwks, err := keyfunc.NewJSON(jwksJSON)
+	jwks, err := goSet.NewJwksWithAKP(jwksJSON)
 	assert.NoError(t, err)
 
 	// Set OAuthPubKeys on the auth issuer
-	instance.app.Auth.OAuthPubKeys = []*keyfunc.JWKS{jwks}
+	instance.app.Auth.OAuthPubKeys = []*goSet.JWKS{jwks}
 
 	// Create OIDC Claims that match our scopes
 	claims := &authSupport.OidcClaims{

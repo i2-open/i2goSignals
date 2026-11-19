@@ -19,13 +19,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
-	"strings"
-	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"strings"
+	"testing"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
@@ -52,14 +50,14 @@ func TestAllowedAlgs_ReturnsAFreshSlice(t *testing.T) {
 // a helper that mints tokens under a *different* kid. Every token the tests
 // produce would therefore fail key lookup — so any error that is not the
 // key-lookup error proves the parser rejected the token before getting there.
-func newAlgConfusionFixture(t *testing.T) (jwks *keyfunc.JWKS, priv *rsa.PrivateKey) {
+func newAlgConfusionFixture(t *testing.T) (jwks *goSet.JWKS, priv *rsa.PrivateKey) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
 	pub := priv.PublicKey
-	given := keyfunc.NewGivenRSA(&pub, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{"the-only-known-kid": given}), priv
+	given := goSet.VerificationKey{Key: &pub, Alg: "RS256"}
+	return goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{"the-only-known-kid": given}), priv
 }
 
 const unknownKid = "a-kid-the-jwks-has-never-heard-of"
@@ -148,8 +146,8 @@ func TestParse_AllowedAlgStillAccepted(t *testing.T) {
 	require.NoError(t, err)
 
 	pub := priv.PublicKey
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
-		set.Kid: keyfunc.NewGivenRSA(&pub, keyfunc.GivenKeyOptions{Algorithm: "RS256"}),
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{
+		set.Kid: goSet.VerificationKey{Key: &pub, Alg: "RS256"},
 	})
 
 	got, err := goSet.Parse(signed, jwks)

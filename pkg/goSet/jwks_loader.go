@@ -2,15 +2,174 @@ package goSet
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"io"
 	"net/http"
+	"sync"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
-func GetJwks(jwksUrl string) (*keyfunc.JWKS, error) {
+// JwksOptions tunes a remote JWKS fetched by FetchJwks. Zero values take the
+// defaults noted on each field.
+type JwksOptions struct {
+	// Client fetches the set. Default: http.DefaultClient.
+	Client *http.Client
+	// RefreshInterval is the background refresh period. Default 1h; a negative
+	// value disables background refresh (unknown-kid refresh still applies).
+	RefreshInterval time.Duration
+	// RefreshRateLimit is the least time between two refreshes triggered by a
+	// token naming an unknown kid. Default 5m.
+	RefreshRateLimit time.Duration
+	// RefreshTimeout bounds one fetch. Default 60s.
+	RefreshTimeout time.Duration
+	// OnRefreshError is told about a failed refresh. The previous keys stay in
+	// use. Default: logged at WARN.
+	OnRefreshError func(error)
+}
+
+// maxJwksBytes bounds a fetched JWK Set; a real set is a few KB.
+const maxJwksBytes = 1 << 20
+
+// FetchJwks fetches the JWK Set at jwksUrl and keeps it fresh: a background
+// refresh every RefreshInterval, and a synchronous, rate-limited refresh when a
+// token names a kid the set does not hold. Every refresh rebuilds the RSA/EC and
+// AKP keys together from the same bytes. The initial fetch must succeed. Call
+// Close to stop the refresher.
+func FetchJwks(jwksUrl string, opts JwksOptions) (*JWKS, error) {
+	if opts.Client == nil {
+		opts.Client = http.DefaultClient
+	}
+	if opts.RefreshInterval == 0 {
+		opts.RefreshInterval = time.Hour
+	}
+	if opts.RefreshRateLimit == 0 {
+		opts.RefreshRateLimit = 5 * time.Minute
+	}
+	if opts.RefreshTimeout == 0 {
+		opts.RefreshTimeout = 60 * time.Second
+	}
+	if opts.OnRefreshError == nil {
+		opts.OnRefreshError = func(err error) {
+			jwksLog.Warn("JWKS refresh failed; keeping previous keys", "url", jwksUrl, "error", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	j := &JWKS{}
+	r := &jwksRemote{owner: j, url: jwksUrl, opts: opts, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	j.remote = r
+	if err := r.refresh(); err != nil {
+		cancel()
+		return nil, err
+	}
+	if opts.RefreshInterval > 0 {
+		go r.loop()
+	} else {
+		close(r.done)
+	}
+	return j, nil
+}
+
+type jwksRemote struct {
+	owner *JWKS
+	url   string
+	opts  JwksOptions
+
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	closeOnce sync.Once
+
+	refreshMu   sync.Mutex // serializes fetches
+	lastAttempt time.Time  // last unknown-kid refresh; guarded by refreshMu
+}
+
+func (r *jwksRemote) refresh() error {
+	r.refreshMu.Lock()
+	defer r.refreshMu.Unlock()
+	return r.refreshLocked()
+}
+
+func (r *jwksRemote) refreshLocked() error {
+	ctx, cancel := context.WithTimeout(r.ctx, r.opts.RefreshTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
+	if err != nil {
+		return fmt.Errorf("goSet: JWKS request %s: %w", r.url, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := r.opts.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("goSet: fetching JWKS %s: %w", r.url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("goSet: fetching JWKS %s: HTTP %d", r.url, resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxJwksBytes))
+	if err != nil {
+		return fmt.Errorf("goSet: reading JWKS %s: %w", r.url, err)
+	}
+	st, err := buildJwksState(raw)
+	if err != nil {
+		return err
+	}
+	r.owner.mu.Lock()
+	r.owner.state = st
+	r.owner.mu.Unlock()
+	return nil
+}
+
+// refreshForUnknownKID refreshes unless an unknown-kid refresh was attempted
+// within the rate limit, and reports whether the keys were refreshed. Only
+// unknown-kid refreshes start the window: as under keyfunc/v2, the first unknown
+// kid after the initial load (or after a background refresh) is fetched at once.
+// A kid that misses inside the window is not queued for later; the background
+// refresh, or the next miss after the window, picks it up.
+func (r *jwksRemote) refreshForUnknownKID() bool {
+	if r.ctx.Err() != nil {
+		return false
+	}
+	r.refreshMu.Lock()
+	defer r.refreshMu.Unlock()
+	if time.Since(r.lastAttempt) < r.opts.RefreshRateLimit {
+		return false
+	}
+	r.lastAttempt = time.Now()
+	if err := r.refreshLocked(); err != nil {
+		r.opts.OnRefreshError(err)
+		return false
+	}
+	return true
+}
+
+func (r *jwksRemote) loop() {
+	defer close(r.done)
+	t := time.NewTicker(r.opts.RefreshInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-t.C:
+			if err := r.refresh(); err != nil && r.ctx.Err() == nil {
+				r.opts.OnRefreshError(err)
+			}
+		}
+	}
+}
+
+// close stops the refresher and waits for it to exit.
+func (r *jwksRemote) close() {
+	r.closeOnce.Do(r.cancel)
+	<-r.done
+}
+
+// GetJwks fetches a remote JWKS with this project's default client and refresh
+// settings. An empty URL yields nil, nil.
+func GetJwks(jwksUrl string) (*JWKS, error) {
 	return GetJwksWithClient(jwksUrl, nil)
 }
 
@@ -18,77 +177,34 @@ func GetJwks(jwksUrl string) (*keyfunc.JWKS, error) {
 // non-nil. Receiver streams pass a client whose TLS config honors the stream's
 // transmitter TLS settings (tx_tls_skip_verify / tx_tls_certificate) so the
 // issuer JWKS can be fetched from a transmitter presenting a self-signed
-// certificate. When client is nil, behavior is unchanged (SPIFFE transport when
-// enabled, otherwise keyfunc's default client).
-//
-// It is also the AKP-aware loader: keyfunc skips `kty:"AKP"` entries, so after
-// the set is fetched its raw bytes are re-scanned for RFC 9964 ML-DSA keys. If
-// any are present the JWKS is re-created with them supplied as keyfunc given
-// keys, which keyfunc merges back in on every background refresh. The re-fetch
-// costs one extra request and only happens for a transmitter that actually
-// publishes a PQ key — a JWKS with no AKP entry takes the original path
-// untouched.
-func GetJwksWithClient(jwksUrl string, client *http.Client) (*keyfunc.JWKS, error) {
-	jwks, err := getJwks(jwksUrl, client, nil)
-	if err != nil || jwks == nil {
-		return jwks, err
-	}
-	akp, err := AKPGivenKeys(jwks.RawJWKS())
-	if err != nil {
-		// The set parsed well enough for keyfunc; refusing it here would lose
-		// working RSA keys over an AKP entry the receiver may not even need.
-		jwksLog.Warn("Could not scan JWKS for RFC 9964 AKP keys", "url", jwksUrl, "error", err)
-		return jwks, nil
-	}
-	if len(akp) == 0 {
-		return jwks, nil
-	}
-	jwks.EndBackground()
-	return getJwks(jwksUrl, client, akp)
-}
-
-// getJwks is the keyfunc.Get call shared by both passes of GetJwksWithClient.
-// givenKeys is nil on the first pass and carries the AKP keys on the second.
-func getJwks(jwksUrl string, client *http.Client, givenKeys map[string]keyfunc.GivenKey) (*keyfunc.JWKS, error) {
-	keyOptions := keyfunc.Options{
-		GivenKeys: givenKeys,
-		Ctx:       context.Background(),
-		RefreshErrorHandler: func(err error) {
-			log.Printf("There was an error with the jwt.Keyfunc\nError: %s", err.Error())
-		},
-		RefreshInterval:   time.Hour,
-		RefreshRateLimit:  time.Minute * 5,
-		RefreshTimeout:    time.Second * 60,
-		RefreshUnknownKID: true,
-	}
-
-	if client != nil {
-		keyOptions.Client = client
-	} else if tlsSupport.SpiffeEnabled() {
-		// If SPIFFE is enabled, we use the Resilient transport to allow fetching
-		// JWKS from both internal SPIFFE nodes and external HTTPS endpoints.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		x509Source, err := tlsSupport.NewX509Source(ctx)
-		if err == nil {
-			// Note: We leak x509Source here if we don't close it, but keyfunc
-			// doesn't provide an easy way to close the client. Since this is
-			// usually called once per startup or per stream, it's manageable.
-			// Ideally we would pass a shared x509Source.
-			transport, err := tlsSupport.NewResilientMTLSClientTransport(x509Source)
-			if err == nil {
-				keyOptions.Client = &http.Client{
-					Transport: transport,
-					Timeout:   time.Second * 30,
-				}
-			}
-		}
-	}
-
+// certificate. When client is nil, the SPIFFE resilient transport is used when
+// SPIFFE is enabled, otherwise http.DefaultClient.
+func GetJwksWithClient(jwksUrl string, client *http.Client) (*JWKS, error) {
 	if jwksUrl == "" {
 		return nil, nil
 	}
-	log.Printf("Loading JWKS key from: %s", jwksUrl)
+	if client == nil && tlsSupport.SpiffeEnabled() {
+		client = spiffeJwksClient()
+	}
+	jwksLog.Info("Loading JWKS", "url", jwksUrl)
+	return FetchJwks(jwksUrl, JwksOptions{Client: client}) // default refresh settings
+}
 
-	return keyfunc.Get(jwksUrl, keyOptions)
+// spiffeJwksClient returns a client on the SPIFFE resilient transport, which
+// fetches JWKS from both internal SPIFFE nodes and external HTTPS endpoints, or
+// nil if the X.509 source is unavailable.
+func spiffeJwksClient() *http.Client {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The x509Source lives as long as the client; it is created once per JWKS
+	// load (startup or per stream), so this is bounded.
+	x509Source, err := tlsSupport.NewX509Source(ctx)
+	if err != nil {
+		return nil
+	}
+	transport, err := tlsSupport.NewResilientMTLSClientTransport(x509Source)
+	if err != nil {
+		return nil
+	}
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
 }

@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/MicahParks/jwkset"
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
@@ -47,7 +46,7 @@ type KeyService struct {
 	tokenIssuer string
 	tokenKid    string
 	tokenKey    crypto.Signer
-	tokenPubKey *keyfunc.JWKS
+	tokenPubKey *goSet.JWKS
 	authIssuer  *authSupport.AuthIssuer
 
 	// Validity-period state (i2goSignals#318, key_validity.go), guarded by
@@ -950,14 +949,14 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 		if rec.ReceiverJwksUrl != "" {
 			// key is an external key fetch the jwks and convert so it can be added to jwkstore
 			srvLog.Debug("Fetching JWK from server", "url", rec.ReceiverJwksUrl)
-			var jwksExtern *keyfunc.JWKS
+			var jwksExtern *goSet.JWKS
 			jwksExtern, err = goSet.GetJwks(rec.ReceiverJwksUrl)
 			if err != nil {
 				ksLog.Error("Error fetching JWKS from server", "url", rec.ReceiverJwksUrl, "error", err)
 				continue
 			}
 
-			// Convert keyfunc.JWKS to jwkset.JWK and add to jwkstore
+			// Convert goSet.JWKS to jwkset.JWK and add to jwkstore
 			rawJWKS := jwksExtern.RawJWKS()
 
 			var jwksData struct {
@@ -1078,17 +1077,17 @@ func spliceJWKS(doc json.RawMessage, extra []json.RawMessage) (json.RawMessage, 
 	return json.Marshal(set)
 }
 
-func (s *KeyService) getInternalPublicJWKS(ctx context.Context, keyName string) *keyfunc.JWKS {
+func (s *KeyService) getInternalPublicJWKS(ctx context.Context, keyName string) *goSet.JWKS {
 	return s.buildAuthJWKS(ctx, keyName, nil, "")
 }
 
-// buildAuthJWKS constructs a keyfunc.JWKS from all stored public keys for keyName.
+// buildAuthJWKS constructs a goSet.JWKS from all stored public keys for keyName.
 // When signingKey/signingKid are provided, the map entry for signingKid is always
 // set to signingKey's public component — overriding whatever the DB returned for
 // that kid. This guarantees that the signing private key and the verification
 // public key in the returned JWKS are always a matched pair, even when a concurrent
 // cluster node has inserted a different key with the same kid.
-func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingKey crypto.Signer, signingKid string) *keyfunc.JWKS {
+func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingKey crypto.Signer, signingKid string) *goSet.JWKS {
 	keys, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil {
 		ksLog.Error("Error retrieving keys", "keyName", keyName, "error", err)
@@ -1116,7 +1115,7 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 // when a concurrent cluster node inserted a different record under the same kid.
 // Unlike buildAuthJWKS it returns a (possibly empty) non-nil JWKS, so a caller
 // can install an empty verification set to stop a revoked kid from verifying.
-func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signingKid string) *keyfunc.JWKS {
+func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signingKid string) *goSet.JWKS {
 	// Copy before sorting so the caller's slice (which it may still be iterating)
 	// is not mutated. Oldest-first so that when records share a kid the newest
 	// public key overwrites older ones in the map — newest by
@@ -1127,7 +1126,7 @@ func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signin
 		return sorted[j].NewerThan(sorted[i])
 	})
 
-	givenKeys := make(map[string]keyfunc.GivenKey)
+	givenKeys := make(map[string]goSet.VerificationKey)
 	for _, rec := range sorted {
 		if rec.IsRevoked() {
 			continue
@@ -1157,30 +1156,26 @@ func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signin
 		}
 	}
 
-	return keyfunc.NewGiven(givenKeys)
+	return goSet.NewJwksFromKeys(givenKeys)
 }
 
-// givenKeyFor wraps a public key as a keyfunc given key with its algorithm
-// pinned. keyfunc's given-key API is per-algorithm, so this is where the
-// project's two signature algorithms meet one verification set: RSA goes
-// through NewGivenRSA, ML-DSA through NewGivenCustom, which is keyfunc's
-// documented escape hatch for a signing method registered with golang-jwt (and
-// mldsa registers "ML-DSA-65" in its init). EC keys need no escape hatch:
-// keyfunc has NewGivenECDSA.
+// givenKeyFor wraps a public key as a goSet.VerificationKey with its algorithm
+// pinned: RS256 for RSA, ES256 for EC, ML-DSA-65 for ML-DSA. This is where the
+// project's signature algorithms meet one verification set.
 //
-// Pinning Algorithm matters as much as the key itself: keyfunc compares it to
-// the token's own "alg" header before returning the key, so an RSA key can
-// never be handed to an ML-DSA verification and vice versa.
-func givenKeyFor(pub crypto.PublicKey) (keyfunc.GivenKey, error) {
+// Pinning Alg matters as much as the key itself: goSet.JWKS compares it to the
+// token's own "alg" header before returning the key, so an RSA key can never be
+// handed to an ML-DSA verification and vice versa (ADR-0034 §5).
+func givenKeyFor(pub crypto.PublicKey) (goSet.VerificationKey, error) {
 	switch key := pub.(type) {
 	case *rsa.PublicKey:
-		return keyfunc.NewGivenRSA(key, keyfunc.GivenKeyOptions{Algorithm: jwtRS256}), nil
+		return goSet.VerificationKey{Key: key, Alg: jwtRS256}, nil
 	case *ecdsa.PublicKey:
-		return keyfunc.NewGivenECDSA(key, keyfunc.GivenKeyOptions{Algorithm: jwtES256}), nil
+		return goSet.VerificationKey{Key: key, Alg: jwtES256}, nil
 	case *cryptomldsa.PublicKey:
-		return keyfunc.NewGivenCustom(key, keyfunc.GivenKeyOptions{Algorithm: mldsa.Alg}), nil
+		return goSet.VerificationKey{Key: key, Alg: mldsa.Alg}, nil
 	default:
-		return keyfunc.GivenKey{}, fmt.Errorf("unsupported public key type %T", pub)
+		return goSet.VerificationKey{}, fmt.Errorf("unsupported public key type %T", pub)
 	}
 }
 
@@ -1239,7 +1234,7 @@ func (s *KeyService) GetPrivateKeyByKid(ctx context.Context, kid string) (crypto
 }
 
 // GetAuthValidatorPubKey returns the JWKS used to validate auth tokens issued by this server.
-func (s *KeyService) GetAuthValidatorPubKey() *keyfunc.JWKS {
+func (s *KeyService) GetAuthValidatorPubKey() *goSet.JWKS {
 	return s.tokenPubKey
 }
 
