@@ -2,8 +2,8 @@ package test
 
 // Receiver-side RFC 9964 verification (i2goSignals#278).
 //
-// keyfunc parses a JWK Set by switching on "kty" and silently skipping types it
-// does not know, so a JWKS publishing an RSA key and an ML-DSA "AKP" key side
+// jwkset (behind keyfunc) parses a JWK Set by switching on "kty" and cannot
+// parse the AKP type, so with jwkset alone a JWKS publishing an RSA key and an ML-DSA "AKP" key side
 // by side loads today with the AKP key simply absent — and a PQ-signed SET
 // fails with "kid not found", not with anything that says "this receiver cannot
 // do ML-DSA". goSet.NewJwksWithAKP closes that gap. The tests below prove the
@@ -113,14 +113,14 @@ func TestNewJwksWithAKP_APQKidCannotBeUsedForAnRS256Header(t *testing.T) {
 	jwks, err := goSet.NewJwksWithAKP(raw)
 	require.NoError(t, err)
 
-	// The AKP given key pins Algorithm=ML-DSA-65, so keyfunc refuses to hand it
+	// The AKP given key pins Algorithm=ML-DSA-65, so goSet.JWKS refuses to hand it
 	// to a token claiming a different alg — the algorithm-confusion guard
 	// applied at the key as well as at the header.
 	_, err = goSet.Parse(signSET(t, jwt.SigningMethodRS256, rsaKey, "issuer-ML-DSA-65-1"), jwks)
 	assert.Error(t, err)
 }
 
-func TestAKPGivenKeys_SkipsUnusableEntriesWithoutLosingTheSet(t *testing.T) {
+func TestAKPKeys_SkipsUnusableEntriesWithoutLosingTheSet(t *testing.T) {
 	raw, _, _ := dualKeyJWKS(t)
 	var set struct {
 		Keys []json.RawMessage `json:"keys"`
@@ -130,7 +130,7 @@ func TestAKPGivenKeys_SkipsUnusableEntriesWithoutLosingTheSet(t *testing.T) {
 	doc, err := json.Marshal(set)
 	require.NoError(t, err)
 
-	given, err := goSet.AKPGivenKeys(doc)
+	given, err := goSet.AKPKeys(doc)
 	require.NoError(t, err, "one malformed key must not cost a receiver the rest of the set")
 	assert.Len(t, given, 1)
 	assert.Contains(t, given, "issuer-ML-DSA-65-1")

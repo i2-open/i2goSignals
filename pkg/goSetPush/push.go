@@ -6,13 +6,11 @@ package goSetPush
 
 import (
 	"fmt"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 )
 
 // RFC8935 error codes per Section 2.4.
@@ -63,7 +61,7 @@ type ReceivedSET struct {
 // ReceiverConfig configures the push receiver protocol handler.
 type ReceiverConfig struct {
 	// JWKS used to validate incoming SET signatures. If nil, tokens are parsed without signature verification.
-	JWKS *keyfunc.JWKS
+	JWKS *goSet.JWKS
 
 	// ExpectedIssuer is the expected "iss" claim value. If empty, issuer validation is skipped.
 	ExpectedIssuer string

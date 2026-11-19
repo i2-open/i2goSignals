@@ -5,18 +5,16 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -46,13 +44,13 @@ const (
 // signSstpEventSet signs one SET carrying the given event payload, with an
 // iss_sub subject the RISC pack accepts, and returns the compact JWS plus a
 // JWKS that verifies it.
-func signSstpEventSet(t *testing.T, jti, eventUri string, payload map[string]any) (string, *keyfunc.JWKS) {
+func signSstpEventSet(t *testing.T, jti, eventUri string, payload map[string]any) (string, *goSet.JWKS) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	signed, kid := signSstpEventSetWithKey(t, priv, jti, eventUri, payload)
-	given := keyfunc.NewGivenRSA(&priv.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	return signed, keyfunc.NewGiven(map[string]keyfunc.GivenKey{kid: given})
+	given := goSet.VerificationKey{Key: &priv.PublicKey, Alg: "RS256"}
+	return signed, goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{kid: given})
 }
 
 // signSstpEventSetWithKey signs against a caller-supplied key so a test can put
@@ -111,7 +109,7 @@ func sstpValidationPair(mode model.EventValidationMode, inboundDelivered []strin
 // acceptorVerify drives the acceptor's verify+policy helper exactly as
 // ReceiveSstpEventHandler does: resolve the pair's inbound mode, build the
 // validator set from the inbound leg, verify, then apply the mode.
-func acceptorVerify(t *testing.T, rec *model.StreamStateRecord, jwks *keyfunc.JWKS, sets map[string]string) ([]string, map[string]goSetSstp.SetErr) {
+func acceptorVerify(t *testing.T, rec *model.StreamStateRecord, jwks *goSet.JWKS, sets map[string]string) ([]string, map[string]goSetSstp.SetErr) {
 	t.Helper()
 	policy, validators := sstpInboundValidationPolicy(rec, rec.EventValidation, nil)
 	cfg := goSetSstp.VerifyConfig{
@@ -143,7 +141,7 @@ func TestSstpAcceptor_EventValidationModeMatrix(t *testing.T) {
 		name       string
 		mode       model.EventValidationMode
 		token      string
-		jwks       *keyfunc.JWKS
+		jwks       *goSet.JWKS
 		wantReject bool
 	}{
 		{"NONE forwards a malformed payload", model.EventValidationNone, malformed, malformedJwks, false},
@@ -189,8 +187,8 @@ func TestSstpAcceptor_EnforceNamesUriAndClaimAndSparesOtherJtis(t *testing.T) {
 		map[string]any{"reason": "   "})
 	good, _ := signSstpEventSetWithKey(t, priv, sstpValidationGoodJti, sstpRiscDisabledUri,
 		map[string]any{"reason": "hijacking"})
-	given := keyfunc.NewGivenRSA(&priv.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	merged := keyfunc.NewGiven(map[string]keyfunc.GivenKey{kid: given})
+	given := goSet.VerificationKey{Key: &priv.PublicKey, Alg: "RS256"}
+	merged := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{kid: given})
 
 	rec := sstpValidationPair(model.EventValidationEnforce, []string{sstpRiscDisabledUri})
 	parsed, setErrs := acceptorVerify(t, rec, merged, map[string]string{
@@ -261,7 +259,7 @@ func TestSstpDialer_InboundHalfEventValidationModeMatrix(t *testing.T) {
 		name       string
 		mode       model.EventValidationMode
 		token      string
-		jwks       *keyfunc.JWKS
+		jwks       *goSet.JWKS
 		wantReject bool
 	}{
 		{"NONE forwards a malformed payload", model.EventValidationNone, malformed, malformedJwks, false},

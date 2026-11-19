@@ -17,8 +17,6 @@ import (
 	cryptomldsa "crypto/mldsa"
 	"testing"
 
-	"github.com/MicahParks/keyfunc/v2"
-
 	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
 )
 
@@ -32,10 +30,9 @@ var benchMLDSAKey = func() *cryptomldsa.PrivateKey {
 	return key
 }()
 
-func benchMLDSAJwks() *keyfunc.JWKS {
-	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{
-		benchIssuer: keyfunc.NewGivenCustom(benchMLDSAKey.PublicKey(),
-			keyfunc.GivenKeyOptions{Algorithm: mldsa.Alg}),
+func benchMLDSAJwks() *JWKS {
+	return NewJwksFromKeys(map[string]VerificationKey{
+		benchIssuer: VerificationKey{Key: benchMLDSAKey.PublicKey(), Alg: mldsa.Alg},
 	})
 }
 

@@ -5,15 +5,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/wal"
@@ -148,11 +146,11 @@ func newMongoRouterBenchWith(b *testing.B, log wal.Log) *mongoRouterBench {
 	if err != nil {
 		b.Fatal(err)
 	}
-	given := keyfunc.NewGivenCustom(&key.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
+	given := goSet.VerificationKey{Key: &key.PublicKey, Alg: "RS256"}
 	return &mongoRouterBench{
 		p: p, r: r, ctx: ctx, rxSid: pair.SstpInbound.Id, outSid: created.Id, signer: key,
 		verifyCfg: goSetSstp.VerifyConfig{
-			JWKS:              keyfunc.NewGiven(map[string]keyfunc.GivenKey{"bench-kid": given}),
+			JWKS:              goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{"bench-kid": given}),
 			ExpectedIssuer:    "https://rx.issuer.example",
 			ExpectedAudiences: []string{"https://rx.audience.example"},
 			RequireSignature:  true,

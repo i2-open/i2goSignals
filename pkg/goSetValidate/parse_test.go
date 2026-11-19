@@ -3,19 +3,17 @@ package goSetValidate
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
 )
 
 // signSet produces a signed SET wire string plus the JWKS a verifier needs to
 // accept it. RS256 is the signing algorithm production uses elsewhere in pkg/goSet.
-func signSet(t *testing.T, set *goSet.SecurityEventToken) (string, *keyfunc.JWKS) {
+func signSet(t *testing.T, set *goSet.SecurityEventToken) (string, *goSet.JWKS) {
 	t.Helper()
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -26,8 +24,8 @@ func signSet(t *testing.T, set *goSet.SecurityEventToken) (string, *keyfunc.JWKS
 	require.NoError(t, err)
 
 	pub := priv.PublicKey
-	given := keyfunc.NewGivenRSA(&pub, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	return signed, keyfunc.NewGiven(map[string]keyfunc.GivenKey{set.Kid: given})
+	given := goSet.VerificationKey{Key: &pub, Alg: "RS256"}
+	return signed, goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{set.Kid: given})
 }
 
 // TestParseAndValidate_NilValidatorSetDegradesToPlainParse is the story-17

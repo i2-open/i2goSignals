@@ -6,7 +6,7 @@ go 1.27.4
 
 require (
 	github.com/MicahParks/jwkset v0.11.5
-	github.com/MicahParks/keyfunc/v2 v2.1.0
+	github.com/MicahParks/keyfunc/v3 v3.9.2
 	github.com/alecthomas/kong v1.17.0
 	github.com/brianvoe/gofakeit/v7 v7.18.9
 	github.com/chzyer/readline v1.5.1

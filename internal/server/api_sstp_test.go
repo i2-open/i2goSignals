@@ -5,12 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
-	"net/http"
-	"reflect"
-	"strings"
-	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -19,12 +13,16 @@ import (
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"net/http"
+	"reflect"
+	"strings"
+	"testing"
 )
 
 // signedSet renders a SET to its compact JWS string using RS256 and returns
 // both the wire string and a matching JWKS the receiver can use to verify it.
 // Per ADR-0066 §D2 the receiver requires a configured trust anchor.
-func signedSet(t *testing.T, jti, iss, aud string) (string, *keyfunc.JWKS) {
+func signedSet(t *testing.T, jti, iss, aud string) (string, *goSet.JWKS) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -44,8 +42,8 @@ func signedSet(t *testing.T, jti, iss, aud string) (string, *keyfunc.JWKS) {
 	signed, err := set.JWS(jwt.SigningMethodRS256, priv)
 	require.NoError(t, err)
 
-	given := keyfunc.NewGivenRSA(&priv.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{set.Kid: given})
+	given := goSet.VerificationKey{Key: &priv.PublicKey, Alg: "RS256"}
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{set.Kid: given})
 	return signed, jwks
 }
 

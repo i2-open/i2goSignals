@@ -5,17 +5,15 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"log"
-	"testing"
-	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
+	"log"
+	"testing"
+	"time"
 )
 
 type MongoProviderSuite struct {
@@ -316,7 +314,7 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 
 	s.NotNil(issPubJson, "Check public key returned")
 	if issPubJson != nil {
-		issPub, err := keyfunc.NewJSON(*issPubJson)
+		issPub, err := goSet.NewJwksWithAKP(*issPubJson)
 		s.NoError(err, "No error parsing json into JWKS")
 		s.Contains(issPub.KIDs(), kid, "Confirm the issuer's key present")
 	}
@@ -351,7 +349,7 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 	issPubJson := s.provider.GetKeyService().GetPublicJWKS(context.Background(), issuerPub)
 	s.NotNil(issPubJson)
 	if issPubJson != nil {
-		issPub, err := keyfunc.NewJSON(*issPubJson)
+		issPub, err := goSet.NewJwksWithAKP(*issPubJson)
 		s.NoError(err)
 		s.Contains(issPub.KIDs(), "key-pub")
 	}

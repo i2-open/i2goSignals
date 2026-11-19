@@ -1,8 +1,6 @@
 package goSetValidate
 
 import (
-	"github.com/MicahParks/keyfunc/v2"
-
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
@@ -23,7 +21,7 @@ import (
 // A validation failure is REPORTED, never returned as an error — this package
 // computes dispositions and never rejects. Mode policy (NONE / WARN / ENFORCE /
 // STRICT) and wire-error mapping belong to the server wiring.
-func ParseAndValidate(tokenString string, issuerPublicJwks *keyfunc.JWKS, vs *ValidatorSet) (*goSet.SecurityEventToken, SetResult, error) {
+func ParseAndValidate(tokenString string, issuerPublicJwks *goSet.JWKS, vs *ValidatorSet) (*goSet.SecurityEventToken, SetResult, error) {
 	set, err := goSet.Parse(tokenString, issuerPublicJwks)
 	if err != nil {
 		return nil, SetResult{}, err

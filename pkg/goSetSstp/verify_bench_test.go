@@ -8,13 +8,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
@@ -33,7 +31,7 @@ type benchSigner struct {
 	alg    string
 	method jwt.SigningMethod
 	key    crypto.Signer
-	jwks   *keyfunc.JWKS
+	jwks   *goSet.JWKS
 }
 
 func newBenchSigner(b *testing.B, alg string) benchSigner {
@@ -65,8 +63,8 @@ func newBenchSigner(b *testing.B, alg string) benchSigner {
 	if err != nil {
 		b.Fatalf("gen %s key: %v", alg, err)
 	}
-	given := keyfunc.NewGivenCustom(pub, keyfunc.GivenKeyOptions{Algorithm: alg})
-	return benchSigner{alg: alg, method: m, key: key, jwks: keyfunc.NewGiven(map[string]keyfunc.GivenKey{kid: given})}
+	given := goSet.VerificationKey{Key: pub, Alg: alg}
+	return benchSigner{alg: alg, method: m, key: key, jwks: goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{kid: given})}
 }
 
 // signBenchBatch signs n SETs shaped like a typical SCIM/CAEP event: one

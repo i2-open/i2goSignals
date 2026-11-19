@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 // OidcClaims represents the claims from an OIDC token (e.g., from Keycloak)
@@ -25,11 +25,11 @@ type OidcClaims struct {
 
 // TokenValidator provides methods to validate JWT and OIDC tokens.
 type TokenValidator struct {
-	PublicKey *keyfunc.JWKS
+	PublicKey *goSet.JWKS
 }
 
 // NewTokenValidator creates a new TokenValidator with the provided public key.
-func NewTokenValidator(publicKey *keyfunc.JWKS) *TokenValidator {
+func NewTokenValidator(publicKey *goSet.JWKS) *TokenValidator {
 	return &TokenValidator{PublicKey: publicKey}
 }
 

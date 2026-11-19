@@ -20,12 +20,10 @@ package test
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
@@ -34,7 +32,7 @@ import (
 // JWKS a verifier would need to accept it. Uses RS256 to match the signing
 // algorithm production uses. Returned separately so tests can wire them in
 // different orders.
-func newSignedSetForSplitTests(t *testing.T) (signedString string, jwks *keyfunc.JWKS, kid string) {
+func newSignedSetForSplitTests(t *testing.T) (signedString string, jwks *goSet.JWKS, kid string) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -51,8 +49,8 @@ func newSignedSetForSplitTests(t *testing.T) (signedString string, jwks *keyfunc
 	require.NoError(t, err)
 
 	pub := priv.PublicKey
-	given := keyfunc.NewGivenRSA(&pub, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
-	j := keyfunc.NewGiven(map[string]keyfunc.GivenKey{set.Kid: given})
+	given := goSet.VerificationKey{Key: &pub, Alg: "RS256"}
+	j := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{set.Kid: given})
 
 	return signed, j, set.Kid
 }

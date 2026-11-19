@@ -5,13 +5,11 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
-	"testing"
-	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
+	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
@@ -23,9 +21,9 @@ import (
 func TestVerifyAll(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	given := keyfunc.NewGivenCustom(&key.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
+	given := goSet.VerificationKey{Key: &key.PublicKey, Alg: "RS256"}
 	cfg := goSetSstp.VerifyConfig{
-		JWKS:              keyfunc.NewGiven(map[string]keyfunc.GivenKey{"kid-batch": given}),
+		JWKS:              goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{"kid-batch": given}),
 		ExpectedIssuer:    testIssuer,
 		ExpectedAudiences: []string{testAudience},
 		RequireSignature:  true,

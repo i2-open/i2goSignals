@@ -6,15 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -24,6 +15,13 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 var ssLog = logger.Sub("STREAM_SERVICE")
@@ -1633,7 +1631,7 @@ func (s *StreamService) evictReceiverEntries(streamID string) {
 	// Outside the lock: the stream is gone, so its issuer's hourly JWKS refresh
 	// must go with it rather than outlive the stream that justified it (GH
 	// #290). Another stream on the same issuer is unaffected — it holds its own
-	// entry, loaded by its own keyfunc.Get, with its own refresher.
+	// entry, loaded by its own goSet.FetchJwks, with its own refresher.
 	for _, entry := range dropped {
 		entry.endBackground()
 	}
@@ -2105,13 +2103,13 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 	s.mu.Unlock()
 
 	// The rebuild swaps the whole map, so every entry that was in it is now
-	// unreachable — and each URL-sourced entry carries a keyfunc background
+	// unreachable — and each URL-sourced entry carries a background JWKS
 	// refresher nothing else will ever end. Left running they accumulate one
 	// goroutine and one hourly outbound JWKS fetch per rebuild, for streams that
 	// may no longer exist; the leak is bounded by rebuild count rather than by
 	// request volume, which is why it shows as slow growth rather than a spike
 	// (GH #290). Ending them here is safe because the new entries were each
-	// built by their own keyfunc.Get and share no JWKS with the old ones — the
+	// built by their own goSet.FetchJwks and share no JWKS with the old ones — the
 	// identity check below states that rather than assuming it.
 	retained := make(map[*receiverCacheEntry]struct{}, len(res))
 	for _, entry := range res {
@@ -2324,7 +2322,7 @@ func (s *StreamService) newReceiverEntry(ctx context.Context, rec *model.StreamS
 // enabled returns errDirectionNotEnabled without touching the network, keeping
 // that outcome distinguishable from a failed fetch (ADR 0033 names it as the
 // third of the three nils that must not be folded together).
-func (s *StreamService) resolveSnapshotJwks(ctx context.Context, snap receiveDirectionSnapshot) (*keyfunc.JWKS, error) {
+func (s *StreamService) resolveSnapshotJwks(ctx context.Context, snap receiveDirectionSnapshot) (*goSet.JWKS, error) {
 	if !snap.present || !snap.enabled {
 		return nil, errDirectionNotEnabled
 	}
@@ -2370,7 +2368,7 @@ func (s *StreamService) persistDisabledRecord(ctx context.Context, rec *model.St
 // cache lock released. A nil JWKS means "no JWKS available"; callers must NOT
 // treat that as "verification disabled" (finding #2). Used for both plain
 // receiver streams and the inbound direction of an SSTP pair.
-func (s *StreamService) fetchReceiverJwks(ctx context.Context, snap receiveDirectionSnapshot) (*keyfunc.JWKS, error) {
+func (s *StreamService) fetchReceiverJwks(ctx context.Context, snap receiveDirectionSnapshot) (*goSet.JWKS, error) {
 	if snap.jwksUrl == "" {
 		ssLog.Debug("Attempting to load JWKS internally", "iss", snap.iss)
 		jwksJson := s.keyService.GetPublicJWKS(ctx, snap.iss)
@@ -2378,9 +2376,9 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, snap receiveDirec
 			ssLog.Debug("No JWKS key found for issuer", "iss", snap.iss)
 			return nil, nil
 		}
-		// NewJwksWithAKP, not keyfunc.NewJSON: an issuer with a stream opted
-		// into RFC 9964 publishes an ML-DSA "AKP" key that keyfunc silently
-		// skips, and this is the loopback path a same-server receiver stream
+		// NewJwksWithAKP rather than a plain jwkset parse: an issuer with a
+		// stream opted into RFC 9964 publishes an ML-DSA "AKP" key that jwkset
+		// cannot parse, and this is the loopback path a same-server receiver stream
 		// verifies against.
 		jwks, err := goSet.NewJwksWithAKP(*jwksJson)
 		if jwks == nil && err != nil {
@@ -2431,11 +2429,11 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, snap receiveDirec
 // That is what makes the "will retry" the transient-error log promises actually
 // happen — before GH #264 the nil was cached under the SID and every later
 // lookup was a hit on it for the life of the process.
-func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string) *keyfunc.JWKS {
+func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string) *goSet.JWKS {
 	s.mu.RLock()
 	entry, ok := s.receiverStreams[sid]
 	var (
-		cached *keyfunc.JWKS
+		cached *goSet.JWKS
 		due    bool
 	)
 	if ok {
@@ -2463,7 +2461,7 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 		s.mu.Unlock()
 		// The fetch above ran unlocked, so a concurrent miss may have installed
 		// an entry in the meantime. Last writer still wins, but the entry it
-		// displaces takes its keyfunc refresher with it (GH #290).
+		// displaces takes its JWKS refresher with it (GH #290).
 		displaced.endBackground()
 		return newEntry.jwks
 	}
@@ -2494,7 +2492,7 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 // concurrent lookups stampeding the endpoint) and again to fold in the outcome.
 // The second acquisition tolerates a concurrent writer having resolved,
 // replaced, or evicted the entry in between (ADR 0033).
-func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyfunc.JWKS {
+func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *goSet.JWKS {
 	s.mu.Lock()
 	entry, ok := s.receiverStreams[sid]
 	if !ok {

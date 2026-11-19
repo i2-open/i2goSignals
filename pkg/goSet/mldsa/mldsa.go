@@ -9,7 +9,7 @@
 // golang-jwt work is open (golang-jwt#508, golang-jwt#519). Everything in this
 // package is therefore deliberately shaped to be *deletable*: it plugs into the
 // two extension points those libraries already publish — jwt.RegisterSigningMethod
-// for the algorithm and keyfunc.NewGivenCustom for the key — so when upstream
+// for the algorithm and goSet.VerificationKey for the key — so when upstream
 // ships, the swap is an import change at the seam and not a rewrite of the
 // signing or verification paths. See docs/adr/0034-ml-dsa-set-signing.md.
 //

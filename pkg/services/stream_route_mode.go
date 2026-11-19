@@ -85,7 +85,7 @@ func (s *StreamService) refreshReceiverEntry(ctx context.Context, rec *model.Str
 	displaced := s.receiverStreams[snap.sid]
 	s.receiverStreams[snap.sid] = entry
 	s.mu.Unlock()
-	// The displaced entry's keyfunc refresher would otherwise outlive it (GH #290).
+	// The displaced entry's JWKS refresher would otherwise outlive it (GH #290).
 	displaced.endBackground()
 	ssLog.Debug("Receiver verification material refreshed after update", "sid", snap.sid, "iss", snap.iss)
 }

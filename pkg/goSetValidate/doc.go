@@ -33,5 +33,6 @@
 //
 // Per the standing pkg/goSet* rule and the #247 Slice Contract, this package
 // imports only pkg/goSet, pkg/goSet/events, pkg/subjectid, the standard library,
-// and github.com/MicahParks/keyfunc. TestPackageImportBoundary enforces it.
+// and nothing outside the standard library and pkg/goSet's own dependencies.
+// TestPackageImportBoundary enforces it.
 package goSetValidate
