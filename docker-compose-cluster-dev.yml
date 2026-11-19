@@ -290,7 +290,7 @@ services:
     entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.8.0
+    image: independentid/i2scim-universal:0.10.7
     depends_on:
       goSignals1:
         condition: service_started
@@ -307,7 +307,7 @@ services:
       - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
       - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
   scim_cluster2:
-    image: independentid/i2scim-universal:0.8.0
+    image: independentid/i2scim-universal:0.10.7
     depends_on:
       goSignals1:
         condition: service_started

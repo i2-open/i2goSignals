@@ -623,7 +623,7 @@ services:
     entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:latest
+    image: independentid/i2scim-universal:0.10.7
     container_name: scim_cluster1
     networks:
       - frontend
@@ -652,7 +652,7 @@ services:
       - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
 
   scim_cluster2:
-    image: independentid/i2scim-universal:latest
+    image: independentid/i2scim-universal:0.10.7
     container_name: scim_cluster2
     networks:
       - frontend
