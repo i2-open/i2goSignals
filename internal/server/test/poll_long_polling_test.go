@@ -461,9 +461,12 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 			signalReady := func() { readyOnce.Do(ready.Done) }
 			defer signalReady()
 
+			// An explicit TimeoutSecs keeps the package's 1 s default
+			// (main_test.go) from releasing the polls before the event fires.
 			pollParams := model.PollParameters{
 				ReturnImmediately: false,
 				MaxEvents:         5,
+				TimeoutSecs:       5,
 			}
 
 			bodyBytes, _ := json.Marshal(pollParams)
