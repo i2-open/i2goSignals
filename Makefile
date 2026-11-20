@@ -23,7 +23,7 @@ GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 # Docker image settings. build-publish follows the family's S1 delegation
 # contract (planning#26, rev 2 in planning#135): the pushed refs are exactly
 # $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) and :latest (the dual tag), e.g.
-#   make build-publish REGISTRY=docker.io NAMESPACE=independentid TAG=v0.12.0-alpha.21 PUSH=1
+#   make build-publish REGISTRY=docker.io NAMESPACE=independentid TAG=v0.12.0 PUSH=1
 # (PUSH=yes also pushes; any other PUSH value is a smoke build.)
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
@@ -233,7 +233,7 @@ build-docker: cross-compile-linux
 # in planning#135): the planning publisher runs it inside a clean tag clone as
 #
 #   make build-publish REGISTRY=docker.io NAMESPACE=independentid \
-#       TAG=v0.12.0-alpha.21 PUSH=1 [PLATFORMS=..] [BUILDX_BUILDER=..] [META_DIR=<abs dir>]
+#       TAG=v0.12.0 PUSH=1 [PLATFORMS=..] [BUILDX_BUILDER=..] [META_DIR=<abs dir>]
 #
 # PUSH unset (or any value other than 1/yes): build every PLATFORMS arch into the buildx cache; push nothing,
 #   tag nothing (a multi-arch manifest cannot be --load'd into the daemon).
