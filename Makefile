@@ -93,7 +93,7 @@ help:
 	@echo "  build              - check-certs + console-build + server-build (no docker)"
 	@echo "  console-build      - build the goSignals CLI"
 	@echo "  server-build       - build bin/goSignalsServer"
-	@echo "  run                - build + bring up docker-compose.yml demo cluster"
+	@echo "  run                - bring up the docker-compose.yml demo cluster (published image)"
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
@@ -416,8 +416,7 @@ dev-rebuild: dev-build-image
 clean-scim:
 	rm -f -v $(SCIM_CONFIG)/*.pem $(SCIM_CONFIG)/*.jwt $(SCIM_CONFIG)/*.env $(SCIM_CONFIG)/config.json $(SCIM_CONFIG)/data1/*.pem $(SCIM_CONFIG)/data2/*.pem $(SCIM_CONFIG)/data1/*.j* $(SCIM_CONFIG)/data2/*.j*
 
-run-spiffe-demo:
-	$(MAKE) dev-build-image
+run-spiffe-demo: check-certs
 	$(DOCKER) compose -f docker-compose-spiffe.yml up -d
 
 dev-reset-spiffe:
@@ -531,8 +530,9 @@ dev-clean:
 	$(DOCKER) compose -f docker-compose-dev.yml down -v
 	$(MAKE) clean-scim
 
-# Start the docker-compose.yml demo cluster.
-run: build build-docker
+# Start the docker-compose.yml demo cluster. It runs the published image, so
+# nothing is built; check-certs supplies the config/certs the stack mounts.
+run: check-certs
 	$(DOCKER) compose -f docker-compose.yml up -d
 
 # Cross-repo seam self-check (family "make seams" contract).

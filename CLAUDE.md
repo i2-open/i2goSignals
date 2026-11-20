@@ -15,7 +15,7 @@ make server-build       # build bin/goSignalsServer (cmd/goSignalsServer)
 make generate-certs     # cmd/genTlsKeys (auto-run by check-certs if certs missing)
 make licenses-check     # verify Go deps use permissive licenses
 make clean              # dev-clean + remove bin/ and top-level binaries
-make run                # build + build-docker + bring up docker-compose.yml demo cluster
+make run                # check-certs + bring up docker-compose.yml demo cluster (published image, no build)
 
 # Docker image (production distroless, buildx) — not part of `make build`
 make build-docker            # local host-arch image -> i2gosignals:<ver> + :latest
