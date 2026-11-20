@@ -5,10 +5,10 @@ go 1.27.4
 // replace github.com/i2-open/i2goSignals => ../i2goSignals
 
 require (
-	github.com/MicahParks/jwkset v0.11.5
+	github.com/MicahParks/jwkset v0.12.0
 	github.com/MicahParks/keyfunc/v3 v3.9.2
 	github.com/alecthomas/kong v1.17.0
-	github.com/brianvoe/gofakeit/v7 v7.18.9
+	github.com/brianvoe/gofakeit/v7 v7.18.10
 	github.com/chzyer/readline v1.5.1
 	github.com/fatih/structs v1.1.0
 	github.com/go-jose/go-jose/v4 v4.1.9
@@ -31,7 +31,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/klauspost/compress v1.20.4 // indirect
+	github.com/klauspost/compress v1.20.5 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pandatix/go-abnf v0.5.5 // indirect
