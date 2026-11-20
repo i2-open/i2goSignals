@@ -195,7 +195,7 @@ services:
       - "./config/certs:/etc/grafana/certs:ro"
 
   goSignals1:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSignalsServer
     container_name: gosignals1
     hostname: goSignals1
@@ -221,7 +221,7 @@ services:
       retries: 30
 
   goSignals2:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSignalsServer
     container_name: gosignals2
     hostname: goSignals2
@@ -244,7 +244,7 @@ services:
       retries: 30
 
   goSsfServer:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSsfServer
     container_name: gossfserver
     hostname: goSsfServer
@@ -267,7 +267,7 @@ services:
       retries: 30
 
   scimSsfSetup:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
    # command: sh /scim/register.sh
     depends_on:
       mongo1:
