@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -28,8 +28,8 @@ func TestPersistence(t *testing.T) {
 	streamReq := model.StreamConfiguration{
 		Aud: []string{"test-aud"},
 	}
-	authCtx := authUtil.ConvertProject("test-project")
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject("test-project")
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 	createdStream, err := provider.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: streamReq}, authCtx.ProjectId, nil)
 	assert.NoError(t, err)
 	streamID := createdStream.Id
@@ -57,7 +57,9 @@ func TestPersistence(t *testing.T) {
 	// Verify state reloaded
 	streams := provider2.streamService.ListStreams(context.Background())
 	assert.Len(t, streams, 1)
-	assert.Equal(t, streamID, streams[0].Id)
+	// ListStreams returns full StreamStateRecords (#300), whose own Id is the
+	// Mongo object id — the SSF stream_id is the embedded configuration's.
+	assert.Equal(t, streamID, streams[0].StreamConfiguration.Id)
 
 	eventRec2 := provider2.eventService.GetEventRecord(context.Background(), eventRec.Jti)
 	assert.NotNil(t, eventRec2)

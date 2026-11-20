@@ -47,6 +47,8 @@ type CLI struct {
 	Use      UseCmd      `cmd:"" help:"Set the active issuer (realm) for a server."`
 	Create   CreateCmd   `cmd:"" help:"Create an issuer KEY, or STREAM"`
 	Delete   DeleteCmd   `cmd:"" help:"Delete a stream or server"`
+	Patch    PatchCmd    `cmd:"" help:"Send a partial-update (PATCH) request to a transmitter"`
+	Replace  ReplaceCmd  `cmd:"" help:"Send a full-replace (PUT) request to a transmitter"`
 	Select   SelectCmd   `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
 	Get      GetCmd      `cmd:"" help:"Get information from SSF servers"`
 	Generate GenerateCmd `cmd:"" help:"Generate an event for testing"`
@@ -348,6 +350,9 @@ func main() {
 
 		if err != nil {
 			td.parser.Errorf("%s", err)
+			if oneCommand {
+				return
+			}
 			continue
 		}
 		if oneCommand {

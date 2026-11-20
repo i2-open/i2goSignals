@@ -1,11 +1,11 @@
 package handler
 
 import (
-	"crypto/rsa"
+	"crypto"
 
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 
-	"github.com/MicahParks/keyfunc/v2"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 /*
@@ -33,13 +33,13 @@ type StreamConfigHandler interface {
 	UpdateStream(streamId string, configuration model.StreamConfiguration) (model.StreamConfiguration, error)
 
 	// GetTransmitterJWKS returns the key that will be used to sign events
-	GetTransmitterJWKS(issuer string) (*rsa.PrivateKey, error)
+	GetTransmitterJWKS(issuer string) (crypto.Signer, error)
 
 	// GetPublicTransmitterJWKS is used by an event receiver to return the transmitter's public key in JWKS form
-	GetPublicTransmitterJWKS(streamId string) (*keyfunc.JWKS, error)
+	GetPublicTransmitterJWKS(streamId string) (*goSet.JWKS, error)
 
 	// GetReceiverJWKS returns the receiver public key used to encrypt events
-	GetReceiverJWKS(streamid string) (*keyfunc.JWKS, error)
+	GetReceiverJWKS(streamid string) (*goSet.JWKS, error)
 
 	// ResetDb is used to reset the database by dropping all collections/tables. Used for testing only.
 	ResetDb()

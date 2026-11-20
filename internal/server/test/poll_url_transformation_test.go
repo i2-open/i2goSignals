@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -81,9 +81,10 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 
 			streamID := "test-" + tt.name
 			streamConfig := model.StreamConfiguration{
-				Id:            streamID,
-				Iss:           "transmitter.example.com",
-				IssuerJWKSUrl: ts.URL + "/jwks",
+				TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+				Id:               streamID,
+				Iss:              "transmitter.example.com",
+				IssuerJWKSUrl:    ts.URL + "/jwks",
 				Delivery: &model.OneOfStreamConfigurationDelivery{
 					PollReceiveMethod: &model.PollReceiveMethod{
 						Method:      model.ReceivePoll,
@@ -93,7 +94,7 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 				},
 			}
 
-			createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+			createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 			assert.NoError(t, err)
 
 			streamState, _ := instance.GetStreamState(createdConfig.Id)

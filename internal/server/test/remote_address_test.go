@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -194,10 +194,11 @@ func (suite *RemoteAddressSuite) TestOutboundPushCapturesRemoteAddress() {
 	defer mockServer.Close()
 
 	streamConfig := model.StreamConfiguration{
-		Iss:             suite.instance.app.GetDefIssuer(),
-		Aud:             []string{"https://mock-receiver.example.com"},
-		EventsSupported: []string{"*"},
-		EventsRequested: []string{"*"},
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              suite.instance.app.GetDefIssuer(),
+		Aud:              []string{"https://mock-receiver.example.com"},
+		EventsSupported:  []string{"*"},
+		EventsRequested:  []string{"*"},
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:      model.DeliveryPush,
@@ -206,7 +207,7 @@ func (suite *RemoteAddressSuite) TestOutboundPushCapturesRemoteAddress() {
 		},
 	}
 
-	atx := authUtil.AuthContext{ProjectId: suite.instance.projectId}
+	atx := authSupport.AuthContext{ProjectId: suite.instance.projectId}
 	created, err := suite.instance.CreateStream(streamConfig, &atx)
 	require.NoError(t, err)
 
@@ -288,7 +289,8 @@ func (suite *RemoteAddressSuite) TestOutboundPollCapturesRemoteAddress() {
 	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "0.1")
 
 	streamConfig := model.StreamConfiguration{
-		Iss: "mock-transmitter",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "mock-transmitter",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -300,7 +302,7 @@ func (suite *RemoteAddressSuite) TestOutboundPollCapturesRemoteAddress() {
 		},
 	}
 
-	atx := authUtil.AuthContext{ProjectId: suite.instance.projectId}
+	atx := authSupport.AuthContext{ProjectId: suite.instance.projectId}
 	created, err := suite.instance.CreateStream(streamConfig, &atx)
 	require.NoError(t, err)
 

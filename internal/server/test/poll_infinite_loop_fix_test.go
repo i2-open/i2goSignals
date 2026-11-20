@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -24,9 +24,10 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 
 	streamID := "test-loop-fix"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: "http://localhost:12345/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    "http://localhost:12345/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -38,7 +39,7 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 		},
 	}
 
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -49,14 +50,14 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Wait for it to hit the connection error and enter Pause state
-	// With our changes, it should STAY in runPollLoop and use the backoff
-	time.Sleep(1 * time.Second)
-
-	// Check that it's in Pause state
-	updatedState, err := instance.GetStreamState(streamID)
-	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
+	// Wait for it to hit the connection error and record the retry. With our
+	// changes it stays in runPollLoop and uses the backoff (base delay 0.1s), so
+	// poll for the transition rather than sleeping a fixed second. A retrying
+	// receiver stays enabled with a reason (#310).
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStateEnabled && st.ErrorMsg != ""
+	}, 3*time.Second, 20*time.Millisecond, "stream should record a retry reason after connection errors")
 
 	// If the infinite loop were present, we would see thousands of "Node lease acquired" messages in the log.
 	// Since we can't easily count them here, we just verify it's still running and hasn't crashed.

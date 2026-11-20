@@ -38,7 +38,7 @@ services:
   # ---------------------------------------------------------------------------
   mongo1:
     container_name: mongo1
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -67,7 +67,7 @@ services:
 
   mongo2:
     container_name: mongo2
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -96,7 +96,7 @@ services:
 
   mongo3:
     container_name: mongo3
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -125,7 +125,7 @@ services:
 
   # Combined helper and setup service
   mongo-init:
-    image: mongo:latest
+    image: mongo:8.0.13
     container_name: mongo-init
     depends_on:
       spire-registration:
@@ -398,7 +398,7 @@ services:
   # goSignals nodes — SPIFFE-enabled
   # ---------------------------------------------------------------------------
   goSignals1:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: gosignals1
     hostname: goSignals1
     command: /app/goSignalsServer
@@ -419,6 +419,7 @@ services:
       - 1.1.1.1
     volumes:
       - spire_sockets:/run/spire/sockets  # SPIRE agent socket
+      - "./config/certs:/app/config/certs:ro"
     env_file:
       - ./config/goSignals1-spiffe.env
     environment:
@@ -435,7 +436,7 @@ services:
       com.i2gosignals.role: gosignals-node
 
   goSignals2:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: gosignals2
     hostname: goSignals2
     command: /app/goSignalsServer
@@ -456,6 +457,7 @@ services:
       - 1.1.1.1
     volumes:
       - spire_sockets:/run/spire/sockets
+      - "./config/certs:/app/config/certs:ro"
     env_file:
       - ./config/goSignals2-spiffe.env
     environment:
@@ -471,7 +473,7 @@ services:
       com.i2gosignals.role: gosignals-node
 
   goSsfServer:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: gossfserver
     hostname: goSsfServer
     command: /app/goSsfServer
@@ -497,6 +499,7 @@ services:
       - 1.1.1.1
     volumes:
       - spire_sockets:/run/spire/sockets
+      - "./config/certs:/app/config/certs:ro"
     env_file:
       - ./config/goSsf1-spiffe.env
     environment:
@@ -510,10 +513,10 @@ services:
   # Keycloak (OAuth2 AS) — same as docker-compose-dev.yml
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:alpine
+    image: postgres:18-alpine
     container_name: postgres
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
       - spire_sockets:/run/spire/sockets
     networks:
       - backend
@@ -527,7 +530,7 @@ services:
       I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4.7
+    image: quay.io/keycloak/keycloak:26.7.3
     container_name: keycloak-signals
     hostname: keycloak
     networks:
@@ -537,19 +540,19 @@ services:
     environment:
       KC_HEALTH_ENABLED: true
       KC_HOSTNAME_STRICT: false
-      KC_HOSTNAME_URL: https://keycloak:9080
+      KC_HOSTNAME: https://keycloak:9080
       KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/server-cert.pem
       KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/server-key.pem
       KC_HTTPS_PORT: 9080
       KC_FEATURES: scripts
       KC_SCRIPT_UPLOAD_ENABLED: "true"
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      QUARKUS_HTTP_HOST: 0.0.0.0
+      KC_HTTP_HOST: 0.0.0.0
       SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
       I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
     ports:
@@ -564,7 +567,7 @@ services:
 
 # cluster-monitor checks the health of spire and mongo cluster and reports any issues
   cluster-monitor:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: cluster-monitor
     depends_on:
       mongo1:
@@ -591,7 +594,7 @@ services:
   # ---------------------------------------------------------------------------
 
   scimSsfSetup:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: scim-ssf-setup
     depends_on:
       mongo1:
@@ -603,7 +606,6 @@ services:
       spire-agent:
         condition: service_healthy
     volumes:
-      - ./:/app
       - "./config/scim:/scim"
       - "./config/certs:/scim/certs"
       - spire_sockets:/run/spire/sockets
@@ -620,10 +622,10 @@ services:
       # coexists with transport-layer SPIFFE mTLS above. Presented on
       # `create key` / `create iat`; must match the goSignals nodes.
       - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
-    entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
+    entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:latest
+    image: independentid/i2scim-universal:0.10.7
     container_name: scim_cluster1
     networks:
       - frontend
@@ -652,7 +654,7 @@ services:
       - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
 
   scim_cluster2:
-    image: independentid/i2scim-universal:latest
+    image: independentid/i2scim-universal:0.10.7
     container_name: scim_cluster2
     networks:
       - frontend

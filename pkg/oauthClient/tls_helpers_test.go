@@ -1,9 +1,18 @@
 package oauthClient
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -11,13 +20,17 @@ import (
 )
 
 func TestGetTlsConfigForServer_NilServer(t *testing.T) {
+	t.Setenv("AUTH_DEBUG", "")
 	config := GetTlsConfigForServer(nil)
 	assert.NotNil(t, config)
 	assert.False(t, config.InsecureSkipVerify)
-	assert.Nil(t, config.RootCAs)
+	// RootCAs must be seeded from the global CA pool (system roots + ca-cert.pem),
+	// never left nil. See issue #220.
+	assert.NotNil(t, config.RootCAs)
 }
 
 func TestGetTlsConfigForServer_NoCustomConfig(t *testing.T) {
+	t.Setenv("AUTH_DEBUG", "")
 	server := &model.Server{
 		Alias:          "test-server",
 		TLSCertificate: "",
@@ -26,7 +39,10 @@ func TestGetTlsConfigForServer_NoCustomConfig(t *testing.T) {
 	config := GetTlsConfigForServer(server)
 	assert.NotNil(t, config)
 	assert.False(t, config.InsecureSkipVerify)
-	assert.Nil(t, config.RootCAs)
+	// Core regression for issue #220: a server with no per-server cert and
+	// TLSSkipVerify=false must still load the global CA pool (ca-cert.pem), so
+	// RootCAs must be non-nil rather than an empty &tls.Config{}.
+	assert.NotNil(t, config.RootCAs)
 }
 
 func TestGetTlsConfigForServer_SkipVerify(t *testing.T) {
@@ -37,7 +53,8 @@ func TestGetTlsConfigForServer_SkipVerify(t *testing.T) {
 	config := GetTlsConfigForServer(server)
 	assert.NotNil(t, config)
 	assert.True(t, config.InsecureSkipVerify)
-	assert.Nil(t, config.RootCAs)
+	// RootCAs is still seeded from the global pool even though skip-verify ignores it.
+	assert.NotNil(t, config.RootCAs)
 }
 
 func TestGetTlsConfigForServer_CustomCertificate(t *testing.T) {
@@ -74,9 +91,10 @@ func TestGetTlsConfigForServer_InvalidCertificate(t *testing.T) {
 	}
 	config := GetTlsConfigForServer(server)
 	assert.NotNil(t, config)
-	// Should return empty config on error
+	// On append failure we fall back to the global pool rather than dropping all
+	// trust, so RootCAs stays non-nil (the global CA pool). See issue #220.
 	assert.False(t, config.InsecureSkipVerify)
-	assert.Nil(t, config.RootCAs)
+	assert.NotNil(t, config.RootCAs)
 }
 
 func TestGetBaseHTTPClientForServer_NilServer(t *testing.T) {
@@ -257,8 +275,8 @@ P1JT2eMb
 	config := GetTlsConfigForServer(server)
 	assert.NotNil(t, config)
 	assert.True(t, config.InsecureSkipVerify)
-	// RootCAs should not be set when SkipVerify is true
-	assert.Nil(t, config.RootCAs)
+	// RootCAs is still seeded from the global pool; skip-verify simply bypasses it.
+	assert.NotNil(t, config.RootCAs)
 }
 
 func TestParseHostPort(t *testing.T) {
@@ -284,6 +302,98 @@ func TestParseHostPort(t *testing.T) {
 			assert.Equal(t, tt.expectedPort, port)
 		})
 	}
+}
+
+// generateCAAndLeaf creates a self-signed CA certificate (returned as PEM) plus a
+// leaf certificate signed by that CA (returned parsed). Because the leaf chains to
+// the CA, verifying the leaf against a pool proves the CA is trusted in that pool.
+func generateCAAndLeaf(t *testing.T, cn string) (caPEM string, leaf *x509.Certificate) {
+	t.Helper()
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: cn + "-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+	caCert, err := x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: cn + "-leaf"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	require.NoError(t, err)
+	leaf, err = x509.ParseCertificate(leafDER)
+	require.NoError(t, err)
+
+	caPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}))
+	return caPEM, leaf
+}
+
+// TestGetTlsConfigForServer_AppendsToGlobalPoolWithoutDiscarding is the central
+// fix for issue #220: a per-server TLSCertificate must be APPENDED to the global
+// CA pool (system roots + ca-cert.pem), not REPLACE it. We wire a temp project CA
+// via I2SIG_TLS_CA_CERT and pin a distinct per-server CA, then assert both are
+// trusted by the resulting RootCAs pool.
+func TestGetTlsConfigForServer_AppendsToGlobalPoolWithoutDiscarding(t *testing.T) {
+	t.Setenv("AUTH_DEBUG", "")
+
+	// A "global/dev CA" written to a temp ca-cert.pem and wired via the env var
+	// GetGlobalCertPool consults, mirroring how the project CA is loaded.
+	globalCAPem, globalLeaf := generateCAAndLeaf(t, "global")
+	caFile := filepath.Join(t.TempDir(), "ca-cert.pem")
+	require.NoError(t, os.WriteFile(caFile, []byte(globalCAPem), 0o600))
+	t.Setenv("I2SIG_TLS_CA_CERT", caFile)
+
+	// A distinct per-server CA, pinned as the server's TLSCertificate.
+	perServerCAPem, perServerLeaf := generateCAAndLeaf(t, "perserver")
+
+	server := &model.Server{Alias: "test-server", TLSCertificate: perServerCAPem}
+	config := GetTlsConfigForServer(server)
+	require.NotNil(t, config)
+	require.NotNil(t, config.RootCAs, "RootCAs must be seeded from the global pool, not nil")
+	assert.False(t, config.InsecureSkipVerify)
+
+	// The per-server cert was appended -> its leaf must verify against the pool.
+	_, err := perServerLeaf.Verify(x509.VerifyOptions{Roots: config.RootCAs})
+	assert.NoError(t, err, "per-server certificate should be appended to the global pool")
+
+	// The global/dev CA must STILL be trusted -> we appended, not replaced.
+	_, err = globalLeaf.Verify(x509.VerifyOptions{Roots: config.RootCAs})
+	assert.NoError(t, err, "global CA roots must be retained (append, not replace)")
+}
+
+// TestGetTlsConfigForServer_AuthDebugEnablesSkipVerify covers the global AUTH_DEBUG
+// override: it forces InsecureSkipVerify even when there is no per-server cert and
+// TLSSkipVerify is false.
+func TestGetTlsConfigForServer_AuthDebugEnablesSkipVerify(t *testing.T) {
+	t.Setenv("AUTH_DEBUG", "true")
+
+	server := &model.Server{Alias: "test-server"}
+	config := GetTlsConfigForServer(server)
+	require.NotNil(t, config)
+	assert.True(t, config.InsecureSkipVerify)
+	assert.NotNil(t, config.RootCAs)
+
+	// Applies on the nil-server path too.
+	nilConfig := GetTlsConfigForServer(nil)
+	require.NotNil(t, nilConfig)
+	assert.True(t, nilConfig.InsecureSkipVerify)
 }
 
 func TestGetTLSConfigIntegrationWithHTTPClient(t *testing.T) {

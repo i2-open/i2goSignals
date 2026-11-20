@@ -77,6 +77,39 @@ the Type tag genuinely optional for the common case.
   `docs/subject_processing.md`; this ADR is the design record behind why
   Type is shaped this way.
 
+## Update (2026-09-10): unset Type resolves to DIRECT, not AUDIENCE
+
+The Decision above states that an unset `Type` defaults to `AUDIENCE`. That
+has not been the matcher's behaviour since issue #199.
+`effectiveEventSourceType` (`pkg/services/event_service.go`) resolves both a
+nil `EventSource` and an empty `Type` to `DIRECT`, and `MatchesStream`
+branches on that resolved value.
+
+The substance of the original decision is unchanged — an unset Type is still
+silent, still optional, and still keeps pre-existing streams working. Only
+the name of the value it resolves to changed, because the two names read
+backwards from what the branches do:
+
+| Resolved type | Filters `MatchesStream` applies |
+|---|---|
+| `DIRECT` (and unset/empty) | `iss`, `aud`, event type — the historical filter |
+| `AUDIENCE` | `iss` and event type; the `aud` filter is **dropped**, the stream's own `aud` being a routing handle rather than a value the event must match |
+| `EXPLICIT` | `iss`, origin stream SID from `source_stream_ids`, event type; `aud` not consulted |
+
+So `DIRECT`, not `AUDIENCE`, is the backward-compatible resolution: it is the
+branch that preserves the `iss`/`aud`/event-type matching this ADR's
+`AUDIENCE` bullet describes. The bullets above describe operator *intent*
+(where events come from and whether there is an upstream to relay filters
+to), which is a separate question from which filters the matcher applies;
+the names coinciding is what let the stale default survive.
+
+The R1–R4 validation rules are unaffected. R4's WARN-and-drop for receiver
+streams is keyed on `IsReceiver()`, so it does not fire for an SSTP pair,
+whose delivery marker is neither `ReceivePush` nor `ReceivePoll`; a pair
+keeps both of its descriptors (ADR 0019 update of the same date, issue #296).
+
+Related: issue #199, issue #296, `docs/adr/0019-sstp-create-bootstrap-dto.md`.
+
 ---
 
 <!-- gosignals-brand-footer -->

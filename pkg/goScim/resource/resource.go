@@ -3,8 +3,8 @@ package resource
 import (
 	"time"
 
-	"github.com/brianvoe/gofakeit/v6"
-	"go.mongodb.org/mongo-driver/v2/bson"
+	"github.com/brianvoe/gofakeit/v7"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 )
 
 type Meta struct {
@@ -22,9 +22,9 @@ type ScimResource struct {
 	Id         string
 	ExternalId string
 	Meta       Meta
-	User
-	Group
-	Extensions
+	User       User
+	Group      Group
+	Extensions Extensions
 }
 
 func GenerateFakeUser(basePath string) ScimResource {
@@ -47,7 +47,7 @@ func GenerateFakeUser(basePath string) ScimResource {
 
 	createdTime := time.Now()
 
-	ident := bson.NewObjectID().Hex()
+	ident := ids.NewObjectID()
 
 	resource := ScimResource{
 		Schemas:    []string{"urn:ietf:params:scim:schemas:core:2.0:User"},
@@ -70,7 +70,7 @@ func GenerateFakeUser(basePath string) ScimResource {
 				},
 			},
 			DisplayName: person.FirstName + " " + person.LastName,
-			ProfileUrl:  person.Image,
+			ProfileUrl:  gofakeit.URL(),
 		},
 
 		Extensions: nil,

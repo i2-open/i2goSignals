@@ -5,16 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func generateTestKey(t *testing.T) *rsa.PrivateKey {
@@ -146,7 +145,8 @@ func TestPollRaw_WithEvents(t *testing.T) {
 		ReturnImmediately: true,
 		Acks:              []string{"prev-jti-1"},
 	}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	require.NoError(t, err)
@@ -165,7 +165,8 @@ func TestPollRaw_EmptyResponse(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	require.NoError(t, err)
@@ -183,8 +184,9 @@ func TestPollRaw_AuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	_, _, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL:   server.URL,
-		Authorization: "Bearer my-auth-token",
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		Authorization:  "Bearer my-auth-token",
 	})
 	assert.NoError(t, err)
 }
@@ -196,7 +198,8 @@ func TestPollRaw_HTTPError401(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, resp)
@@ -211,7 +214,8 @@ func TestPollRaw_HTTPError403(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, resp)
@@ -226,7 +230,8 @@ func TestPollRaw_HTTPError503(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, resp)
@@ -236,7 +241,8 @@ func TestPollRaw_HTTPError503(t *testing.T) {
 
 func TestPollRaw_ConnectionError(t *testing.T) {
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: "http://localhost:1", // unreachable
+		AllowPlaintext: true,
+		EndpointURL:    "http://localhost:1", // unreachable
 	})
 
 	assert.Nil(t, resp)
@@ -246,8 +252,9 @@ func TestPollRaw_ConnectionError(t *testing.T) {
 
 func TestPoll_WithValidSETs(t *testing.T) {
 	key := generateTestKey(t)
-	jti1, token1 := createTestSET(t, "https://issuer.example.com", []string{"https://aud.example.com"}, key)
-	jti2, token2 := createTestSET(t, "https://issuer.example.com", []string{"https://aud.example.com"}, key)
+	iss := "https://issuer.example.com"
+	jti1, token1 := createTestSET(t, iss, []string{"https://aud.example.com"}, key)
+	jti2, token2 := createTestSET(t, iss, []string{"https://aud.example.com"}, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -263,8 +270,10 @@ func TestPoll_WithValidSETs(t *testing.T) {
 	defer server.Close()
 
 	parsed, status, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
-		ExpectedIssuer:    "https://issuer.example.com",
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{"https://aud.example.com"},
 	})
 
@@ -277,9 +286,112 @@ func TestPoll_WithValidSETs(t *testing.T) {
 	assert.Contains(t, parsed.ParsedSETs, jti2)
 }
 
+// jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"
+// goSet.JWS emits when SecurityEventToken.Kid is empty (it falls back to iss).
+func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *goSet.JWKS {
+	t.Helper()
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey}
+	return goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{issuer: givenKey})
+}
+
+// --- Signing-only poll posture (#184): RequireSignature ---
+
+// Under RequireSignature, a pulled SET with no JWKS available to verify against
+// is rejected (jws_signature_failed) rather than accepted unverified. This is the
+// poll-as-receiver mandatory-verification rule: not conditional on JWKS != nil.
+func TestPoll_RequireSignature_NoJWKSRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://aud.example.com"}
+	jti1, token1 := createTestSET(t, iss, aud, key)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
+		EndpointURL:       server.URL,
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.ParsedSETs)
+	require.Contains(t, parsed.Errors, jti1)
+	assert.Equal(t, "jws_signature_failed", parsed.Errors[jti1].Error)
+}
+
+// A validly-signed SET with a matching JWKS is accepted under RequireSignature.
+func TestPoll_RequireSignature_ValidAccepted(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://aud.example.com"}
+	jti1, token1 := createTestSET(t, iss, aud, key)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
+		EndpointURL:       server.URL,
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.Errors)
+	require.Contains(t, parsed.ParsedSETs, jti1)
+}
+
+// A SET whose signature does not verify against the configured JWKS is rejected
+// with jws_signature_failed under RequireSignature.
+func TestPoll_RequireSignature_BadSignatureRejected(t *testing.T) {
+	signKey := generateTestKey(t)
+	otherKey := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://aud.example.com"}
+	jti1, token1 := createTestSET(t, iss, aud, signKey)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
+		EndpointURL:       server.URL,
+		JWKS:              jwksForKey(t, iss, otherKey), // wrong public key
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.ParsedSETs)
+	require.Contains(t, parsed.Errors, jti1)
+	assert.Equal(t, "jws_signature_failed", parsed.Errors[jti1].Error)
+}
+
 func TestPoll_IssuerValidationError(t *testing.T) {
 	key := generateTestKey(t)
-	jti1, token1 := createTestSET(t, "https://wrong-issuer.example.com", nil, key)
+	// Create a well-signed SET whose iss does not match ExpectedIssuer. The
+	// key is registered under the token's actual iss so signature verification
+	// succeeds; the iss mismatch surfaces as invalid_issuer (post-verify).
+	tokenIss := "https://wrong-issuer.example.com"
+	jti1, token1 := createTestSET(t, tokenIss, nil, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -292,7 +404,9 @@ func TestPoll_IssuerValidationError(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext: true,
 		EndpointURL:    server.URL,
+		JWKS:           jwksForKey(t, tokenIss, key),
 		ExpectedIssuer: "https://expected-issuer.example.com",
 	})
 
@@ -304,7 +418,8 @@ func TestPoll_IssuerValidationError(t *testing.T) {
 
 func TestPoll_AudienceValidationError(t *testing.T) {
 	key := generateTestKey(t)
-	jti1, token1 := createTestSET(t, "https://issuer.example.com", []string{"https://wrong-aud.example.com"}, key)
+	iss := "https://issuer.example.com"
+	jti1, token1 := createTestSET(t, iss, []string{"https://wrong-aud.example.com"}, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -317,7 +432,9 @@ func TestPoll_AudienceValidationError(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
+		JWKS:              jwksForKey(t, iss, key),
 		ExpectedAudiences: []string{"https://expected-aud.example.com"},
 	})
 
@@ -328,6 +445,12 @@ func TestPoll_AudienceValidationError(t *testing.T) {
 }
 
 func TestPoll_MalformedSET(t *testing.T) {
+	// Malformed SET is refused at parse time; with a JWKS present it becomes
+	// jws_signature_failed under RequireSignature, and invalid_request without.
+	// We test the no-RequireSignature branch: invalid_request classification.
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
 			Sets: map[string]string{
@@ -341,7 +464,9 @@ func TestPoll_MalformedSET(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		JWKS:           jwksForKey(t, iss, key),
 	})
 
 	require.NoError(t, err)
@@ -352,7 +477,8 @@ func TestPoll_MalformedSET(t *testing.T) {
 
 func TestPoll_MixedValidAndInvalid(t *testing.T) {
 	key := generateTestKey(t)
-	goodJti, goodToken := createTestSET(t, "https://issuer.example.com", nil, key)
+	iss := "https://issuer.example.com"
+	goodJti, goodToken := createTestSET(t, iss, nil, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -368,8 +494,10 @@ func TestPoll_MixedValidAndInvalid(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext: true,
 		EndpointURL:    server.URL,
-		ExpectedIssuer: "https://issuer.example.com",
+		JWKS:           jwksForKey(t, iss, key),
+		ExpectedIssuer: iss,
 	})
 
 	require.NoError(t, err)
@@ -377,6 +505,36 @@ func TestPoll_MixedValidAndInvalid(t *testing.T) {
 	assert.Contains(t, parsed.ParsedSETs, goodJti)
 	assert.Len(t, parsed.Errors, 1)
 	assert.Contains(t, parsed.Errors, "bad-jti")
+}
+
+// TestPoll_NoJWKS_AlwaysRejected pins the ADR-0066 §D2 defense-in-depth: even
+// without RequireSignature, a poll receiver with no configured trust anchor
+// must never accept a SET — the "None + unverified" state is unrepresentable.
+// If this test ever starts accepting the token, the injection hole has
+// reopened.
+func TestPoll_NoJWKS_AlwaysRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	jti1, token1 := createTestSET(t, iss, nil, key)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		// no JWKS, no RequireSignature — the receiver must still refuse.
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.ParsedSETs, "no SET may be accepted without a configured trust anchor (ADR-0066 §D2)")
+	require.Contains(t, parsed.Errors, jti1)
+	assert.Equal(t, "invalid_request", parsed.Errors[jti1].Error)
+	assert.Contains(t, parsed.Errors[jti1].Description, "no trust anchor")
 }
 
 func TestPoll_EmptyResponse(t *testing.T) {
@@ -388,7 +546,8 @@ func TestPoll_EmptyResponse(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	require.NoError(t, err)
@@ -403,7 +562,8 @@ func TestPoll_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	parsed, status, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, parsed)
@@ -422,7 +582,8 @@ func TestPollRaw_SetsJSONHeaders(t *testing.T) {
 	defer server.Close()
 
 	_, _, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 	assert.NoError(t, err)
 }

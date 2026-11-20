@@ -20,7 +20,10 @@ func WritePollResponse(w http.ResponseWriter, response PollResponse) {
 	if response.Sets == nil {
 		response.Sets = make(map[string]string)
 	}
-	respBytes, err := json.MarshalIndent(response, "", "  ")
+	// Compact, not indented: RFC 8936 §2.2 says nothing about whitespace and
+	// this runs on every poll return. json.Marshal also avoids the extra
+	// indent pass MarshalIndent makes over the already-encoded buffer.
+	respBytes, err := json.Marshal(response)
 	if err != nil {
 		http.Error(w, "Error serializing response", http.StatusInternalServerError)
 		return

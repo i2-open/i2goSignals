@@ -1,0 +1,1 @@
+{"stream_id":"stream-golden-2","iss":"https://tx.example.com","aud":["https://rx.example.com"],"events_requested":["urn:example:event:a"],"delivery":{"method":"urn:ietf:rfc:8936"}}

@@ -1,0 +1,396 @@
+package model
+
+import (
+	"encoding/json"
+	"testing"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+// newSstpPairRecord builds a representative bidirectional SSTP StreamStateRecord:
+// transmit side in the primary StreamConfiguration, receive side in SstpInbound,
+// connectivity in SstpMethod, with per-direction status fields populated.
+func newSstpPairRecord() *StreamStateRecord {
+	rec := &StreamStateRecord{
+		PairId: "pair-abc123",
+		StreamConfiguration: StreamConfiguration{
+			Id:       "tx-sid-1",
+			Iss:      "https://tx.example",
+			Delivery: &OneOfStreamConfigurationDelivery{SstpTransmitMarker: &SstpTransmitMarker{Method: DeliverySstp}},
+		},
+		Status:   StreamStateEnabled,
+		ErrorMsg: "",
+		SstpInbound: &StreamConfiguration{
+			Id:       "rx-sid-1",
+			Iss:      "https://rx.example",
+			Delivery: &OneOfStreamConfigurationDelivery{SstpReceiveMarker: &SstpReceiveMarker{Method: ReceiveSstp}},
+		},
+		SstpMethod: &SstpMethod{
+			Role:                SstpRoleInitiator,
+			EndpointUrl:         "https://peer.example/sstp/pair-peer999",
+			AuthorizationHeader: "Bearer secret-token",
+			PeerPairId:          "pair-peer999",
+			// PRD 49 slice 2b (issue #242, AC 4): PeerServerAlias is
+			// persisted on the record so the credential-chain helper can
+			// honor operator-configured TLS/OAuth posture per pair.
+			PeerServerAlias: "peer-tx-alias",
+		},
+		InboundStatus:   StreamStatePause,
+		InboundErrorMsg: "peer unreachable",
+	}
+	return rec
+}
+
+// TestStreamStateRecord_Sstp_GetType proves an SSTP pair record reports the
+// DeliverySstpPair discriminator.
+func TestStreamStateRecord_Sstp_GetType(t *testing.T) {
+	rec := newSstpPairRecord()
+	if got := rec.GetType(); got != DeliverySstpPair {
+		t.Errorf("GetType() = %q, want %q", got, DeliverySstpPair)
+	}
+}
+
+// TestStreamStateRecord_Sstp_HasInboundOutbound proves both directions report
+// true for an SSTP pair.
+func TestStreamStateRecord_Sstp_HasInboundOutbound(t *testing.T) {
+	rec := newSstpPairRecord()
+	if !rec.HasInbound() {
+		t.Error("HasInbound() = false, want true for SSTP pair")
+	}
+	if !rec.HasOutbound() {
+		t.Error("HasOutbound() = false, want true for SSTP pair")
+	}
+}
+
+// TestStreamStateRecord_HasInboundOutbound_Push proves HasInbound/HasOutbound
+// fall through to IsReceiver/IsTransmitter for RFC8935 push records.
+func TestStreamStateRecord_HasInboundOutbound_Push(t *testing.T) {
+	tx := &StreamStateRecord{StreamConfiguration: StreamConfiguration{
+		Delivery: &OneOfStreamConfigurationDelivery{PushTransmitMethod: &PushTransmitMethod{Method: DeliveryPush}},
+	}}
+	if !tx.HasOutbound() {
+		t.Error("push transmitter HasOutbound() = false, want true")
+	}
+	if tx.HasInbound() {
+		t.Error("push transmitter HasInbound() = true, want false")
+	}
+
+	rx := &StreamStateRecord{StreamConfiguration: StreamConfiguration{
+		Delivery: &OneOfStreamConfigurationDelivery{PushReceiveMethod: &PushReceiveMethod{Method: ReceivePush}},
+	}}
+	if !rx.HasInbound() {
+		t.Error("push receiver HasInbound() = false, want true")
+	}
+	if rx.HasOutbound() {
+		t.Error("push receiver HasOutbound() = true, want false")
+	}
+}
+
+// TestStreamStateRecord_HasInboundOutbound_Poll proves the same fall-through for
+// RFC8936 poll records.
+func TestStreamStateRecord_HasInboundOutbound_Poll(t *testing.T) {
+	tx := &StreamStateRecord{StreamConfiguration: StreamConfiguration{
+		Delivery: &OneOfStreamConfigurationDelivery{PollTransmitMethod: &PollTransmitMethod{Method: DeliveryPoll}},
+	}}
+	if !tx.HasOutbound() || tx.HasInbound() {
+		t.Errorf("poll transmitter HasOutbound=%v HasInbound=%v, want true/false", tx.HasOutbound(), tx.HasInbound())
+	}
+
+	rx := &StreamStateRecord{StreamConfiguration: StreamConfiguration{
+		Delivery: &OneOfStreamConfigurationDelivery{PollReceiveMethod: &PollReceiveMethod{Method: ReceivePoll}},
+	}}
+	if !rx.HasInbound() || rx.HasOutbound() {
+		t.Errorf("poll receiver HasInbound=%v HasOutbound=%v, want true/false", rx.HasInbound(), rx.HasOutbound())
+	}
+}
+
+// TestStreamStateRecord_Sstp_JSONRoundTrip proves the new bidirectional fields
+// survive a JSON marshal/unmarshal cycle with values populated.
+func TestStreamStateRecord_Sstp_JSONRoundTrip(t *testing.T) {
+	orig := newSstpPairRecord()
+	raw, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var got StreamStateRecord
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if got.PairId != orig.PairId {
+		t.Errorf("PairId = %q, want %q", got.PairId, orig.PairId)
+	}
+	if got.InboundStatus != orig.InboundStatus {
+		t.Errorf("InboundStatus = %q, want %q", got.InboundStatus, orig.InboundStatus)
+	}
+	if got.InboundErrorMsg != orig.InboundErrorMsg {
+		t.Errorf("InboundErrorMsg = %q, want %q", got.InboundErrorMsg, orig.InboundErrorMsg)
+	}
+	if got.SstpInbound == nil {
+		t.Fatal("SstpInbound lost in round-trip")
+	}
+	if got.SstpInbound.Id != orig.SstpInbound.Id {
+		t.Errorf("SstpInbound.Id = %q, want %q", got.SstpInbound.Id, orig.SstpInbound.Id)
+	}
+	if got.SstpInbound.Delivery.GetMethod() != ReceiveSstp {
+		t.Errorf("SstpInbound delivery method = %q, want %q", got.SstpInbound.Delivery.GetMethod(), ReceiveSstp)
+	}
+	if got.SstpMethod == nil {
+		t.Fatal("SstpMethod lost in round-trip")
+	}
+	if got.SstpMethod.Role != orig.SstpMethod.Role {
+		t.Errorf("SstpMethod.Role = %q, want %q", got.SstpMethod.Role, orig.SstpMethod.Role)
+	}
+	if got.SstpMethod.AuthorizationHeader != orig.SstpMethod.AuthorizationHeader {
+		t.Errorf("SstpMethod.AuthorizationHeader = %q, want %q", got.SstpMethod.AuthorizationHeader, orig.SstpMethod.AuthorizationHeader)
+	}
+	if got.SstpMethod.PeerPairId != orig.SstpMethod.PeerPairId {
+		t.Errorf("SstpMethod.PeerPairId = %q, want %q", got.SstpMethod.PeerPairId, orig.SstpMethod.PeerPairId)
+	}
+	// PRD 49 slice 2b (issue #242, AC 4): PeerServerAlias must survive the
+	// round-trip so the credential-chain helper can resolve the stored
+	// Server's TLS/OAuth posture for outbound SSTP cycles.
+	if got.SstpMethod.PeerServerAlias != orig.SstpMethod.PeerServerAlias {
+		t.Errorf("SstpMethod.PeerServerAlias = %q, want %q", got.SstpMethod.PeerServerAlias, orig.SstpMethod.PeerServerAlias)
+	}
+}
+
+// TestStreamStateRecord_Sstp_JSONOmitEmpty proves the new fields are absent from
+// the JSON when unset (a non-SSTP record pays no marshaling cost).
+func TestStreamStateRecord_Sstp_JSONOmitEmpty(t *testing.T) {
+	rec := &StreamStateRecord{StreamConfiguration: StreamConfiguration{Id: "plain"}}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	s := string(raw)
+	for _, frag := range []string{"sstp_inbound", "sstp_method", "pair_id", "inbound_status", "inbound_error_msg"} {
+		if containsField(s, frag) {
+			t.Errorf("expected %q absent from JSON of empty record, got %s", frag, s)
+		}
+	}
+}
+
+func containsField(s, frag string) bool {
+	return len(s) > 0 && (indexOf(s, `"`+frag+`"`) >= 0)
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestStreamStateRecord_Sstp_DeepCopy proves DeepCopy clones the new pointer
+// fields independently.
+func TestStreamStateRecord_Sstp_DeepCopy(t *testing.T) {
+	orig := newSstpPairRecord()
+	cp := orig.DeepCopy()
+	if cp.SstpInbound == nil || cp.SstpInbound == orig.SstpInbound {
+		t.Fatal("DeepCopy did not allocate an independent SstpInbound")
+	}
+	if cp.SstpMethod == nil || cp.SstpMethod == orig.SstpMethod {
+		t.Fatal("DeepCopy did not allocate an independent SstpMethod")
+	}
+	cp.SstpMethod.AuthorizationHeader = "mutated"
+	if orig.SstpMethod.AuthorizationHeader == "mutated" {
+		t.Error("DeepCopy SstpMethod is not independent")
+	}
+}
+
+// TestSstpMethod_PeerServerAlias_BSONRoundTrip proves PeerServerAlias
+// survives a BSON marshal/unmarshal cycle so a Mongo write/read preserves
+// the field the SSTP dialer's credential-chain helper depends on (PRD 49
+// slice 2b, issue #242, AC 4).
+func TestSstpMethod_PeerServerAlias_BSONRoundTrip(t *testing.T) {
+	orig := &SstpMethod{
+		Role:                SstpRoleResponder,
+		EndpointUrl:         "https://local.example/sstp/pair-abc",
+		AuthorizationHeader: "Bearer minted-secret",
+		PeerPairId:          "pair-peer",
+		PeerServerAlias:     "peer-tx-alias",
+	}
+	raw, err := bson.Marshal(orig)
+	if err != nil {
+		t.Fatalf("bson.Marshal failed: %v", err)
+	}
+	var got SstpMethod
+	if err := bson.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("bson.Unmarshal failed: %v", err)
+	}
+	if got.PeerServerAlias != orig.PeerServerAlias {
+		t.Errorf("PeerServerAlias round-trip: got %q, want %q", got.PeerServerAlias, orig.PeerServerAlias)
+	}
+	// Sanity: the other fields still ride along; the additive slice #242
+	// field must not disturb the existing shape.
+	if got.Role != orig.Role || got.EndpointUrl != orig.EndpointUrl ||
+		got.AuthorizationHeader != orig.AuthorizationHeader || got.PeerPairId != orig.PeerPairId {
+		t.Errorf("SstpMethod BSON round-trip lost sibling fields: got %+v want %+v", got, orig)
+	}
+}
+
+// TestSstpMethod_PeerServerAlias_OmitEmpty proves an unset PeerServerAlias
+// is absent from JSON so pre-slice records (no alias) pay no wire cost.
+func TestSstpMethod_PeerServerAlias_OmitEmpty(t *testing.T) {
+	m := &SstpMethod{Role: SstpRoleInitiator}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if indexOf(string(raw), `"peer_server_alias"`) >= 0 {
+		t.Errorf("peer_server_alias should be omitempty when unset, got %s", raw)
+	}
+}
+
+// TestStreamStateRecord_DirectionStatus pins the status selection GET /status
+// reports (#303): the rx-side SID of a pair names the inbound half, every other
+// SID names the primary (outbound) half, and a record that is not a pair has
+// only that one. The pair fixture is a legacy split record so the two halves
+// are distinguishable; SetStatus keeps them equal on every write.
+func TestStreamStateRecord_DirectionStatus(t *testing.T) {
+	pair := newSstpPairRecord()
+	pair.Status = StreamStateDisable
+	pair.ErrorMsg = "operator stop"
+
+	plain := &StreamStateRecord{
+		StreamConfiguration: StreamConfiguration{Id: "plain-sid"},
+		Status:              StreamStatePause,
+		ErrorMsg:            "maintenance",
+	}
+
+	tests := []struct {
+		name string
+		rec  *StreamStateRecord
+		sid  string
+		want StreamStatus
+	}{
+		{"pair inbound SID reports the inbound half", pair, "rx-sid-1", StreamStatus{Status: StreamStatePause, Reason: "peer unreachable"}},
+		{"pair outbound SID reports the outbound half", pair, "tx-sid-1", StreamStatus{Status: StreamStateDisable, Reason: "operator stop"}},
+		{"pair wire SID reports the outbound half", pair, "pair-abc123", StreamStatus{Status: StreamStateDisable, Reason: "operator stop"}},
+		{"non-pair record reports its only half", plain, "plain-sid", StreamStatus{Status: StreamStatePause, Reason: "maintenance"}},
+		{"non-pair record ignores an unrelated SID", plain, "rx-sid-1", StreamStatus{Status: StreamStatePause, Reason: "maintenance"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.DirectionStatus(tt.sid); got != tt.want {
+				t.Errorf("DirectionStatus(%q) = %+v, want %+v", tt.sid, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStreamStateRecord_SetStatus pins the pair status rule (#303): a pair
+// shares one HTTP exchange, so every status (enabled, paused, disabled) moves
+// both halves, the same single status a push/poll stream carries. Either pair
+// signal alone counts as a pair, a legacy split record heals, and a record that
+// is not a pair has only its primary half to write.
+func TestStreamStateRecord_SetStatus(t *testing.T) {
+	pairWith := func(outStatus, inStatus string) *StreamStateRecord {
+		rec := newSstpPairRecord()
+		rec.Status, rec.ErrorMsg = outStatus, "was "+outStatus
+		rec.InboundStatus, rec.InboundErrorMsg = inStatus, "was "+inStatus
+		return rec
+	}
+	methodOnlyPair := &StreamStateRecord{
+		SstpMethod:    &SstpMethod{Role: SstpRoleResponder},
+		Status:        StreamStateEnabled,
+		InboundStatus: StreamStateEnabled,
+	}
+	inboundOnlyPair := &StreamStateRecord{
+		SstpInbound:   &StreamConfiguration{Id: "rx-sid-1"},
+		Status:        StreamStateEnabled,
+		InboundStatus: StreamStateEnabled,
+	}
+	plain := &StreamStateRecord{Status: StreamStateEnabled, ErrorMsg: "was enabled"}
+
+	now := func(status string) StreamStatus { return StreamStatus{Status: status, Reason: "now"} }
+	tests := []struct {
+		name            string
+		rec             *StreamStateRecord
+		status          string
+		wantOut, wantIn StreamStatus
+	}{
+		{"paused on a pair moves both halves", pairWith(StreamStateEnabled, StreamStateEnabled), StreamStatePause, now(StreamStatePause), now(StreamStatePause)},
+		{"enabled on a pair moves both halves", pairWith(StreamStatePause, StreamStatePause), StreamStateEnabled, now(StreamStateEnabled), now(StreamStateEnabled)},
+		{"disabled on a pair moves both halves", pairWith(StreamStateEnabled, StreamStateEnabled), StreamStateDisable, now(StreamStateDisable), now(StreamStateDisable)},
+		{"enabled takes a disabled pair out on both halves", pairWith(StreamStateDisable, StreamStateDisable), StreamStateEnabled, now(StreamStateEnabled), now(StreamStateEnabled)},
+		{"a legacy split pair heals", pairWith(StreamStateEnabled, StreamStateDisable), StreamStateEnabled, now(StreamStateEnabled), now(StreamStateEnabled)},
+		{"a pair signalled by SstpMethod alone moves both halves", methodOnlyPair, StreamStatePause, now(StreamStatePause), now(StreamStatePause)},
+		{"a pair signalled by SstpInbound alone moves both halves", inboundOnlyPair, StreamStatePause, now(StreamStatePause), now(StreamStatePause)},
+		{"a plain record writes only its primary half", plain, StreamStatePause, now(StreamStatePause), StreamStatus{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.rec.SetStatus(tt.status, "now")
+			if got := (StreamStatus{Status: tt.rec.Status, Reason: tt.rec.ErrorMsg}); got != tt.wantOut {
+				t.Errorf("outbound half = %+v, want %+v", got, tt.wantOut)
+			}
+			if got := (StreamStatus{Status: tt.rec.InboundStatus, Reason: tt.rec.InboundErrorMsg}); got != tt.wantIn {
+				t.Errorf("inbound half = %+v, want %+v", got, tt.wantIn)
+			}
+		})
+	}
+}
+
+// TestStreamStateRecord_IsStatusChange pins the POST /status "no change" test
+// (#303) against what SetStatus writes: on a pair both halves take the status
+// and reason, so it is a change when EITHER half differs (a legacy split record
+// heals); a record that is not a pair is judged on its primary half only.
+// Reasons compare case-insensitively.
+func TestStreamStateRecord_IsStatusChange(t *testing.T) {
+	pairWith := func(outStatus, outReason, inStatus, inReason string) *StreamStateRecord {
+		rec := newSstpPairRecord()
+		rec.Status, rec.ErrorMsg = outStatus, outReason
+		rec.InboundStatus, rec.InboundErrorMsg = inStatus, inReason
+		return rec
+	}
+	methodOnlyPair := &StreamStateRecord{
+		SstpMethod:    &SstpMethod{Role: SstpRoleResponder},
+		Status:        StreamStatePause,
+		ErrorMsg:      "hold",
+		InboundStatus: StreamStateEnabled,
+	}
+	inboundOnlyPair := &StreamStateRecord{
+		SstpInbound:   &StreamConfiguration{Id: "rx-sid-1"},
+		Status:        StreamStatePause,
+		ErrorMsg:      "hold",
+		InboundStatus: StreamStateEnabled,
+	}
+	plain := &StreamStateRecord{
+		Status:          StreamStatePause,
+		ErrorMsg:        "hold",
+		InboundStatus:   StreamStateEnabled,
+		InboundErrorMsg: "ignored",
+	}
+
+	tests := []struct {
+		name   string
+		rec    *StreamStateRecord
+		status string
+		reason string
+		want   bool
+	}{
+		{"both halves already match is not a change", pairWith(StreamStatePause, "hold", StreamStatePause, "hold"), StreamStatePause, "hold", false},
+		{"reasons compare case-insensitively", pairWith(StreamStateDisable, "Stop", StreamStateDisable, "STOP"), StreamStateDisable, "stop", false},
+		{"only the outbound half differing is a change", pairWith(StreamStateEnabled, "", StreamStatePause, "hold"), StreamStatePause, "hold", true},
+		{"only the inbound half differing is a change", pairWith(StreamStatePause, "hold", StreamStateEnabled, ""), StreamStatePause, "hold", true},
+		{"only the other half's reason differing is a change", pairWith(StreamStateDisable, "other", StreamStateDisable, "stop"), StreamStateDisable, "stop", true},
+		{"both halves differing is a change", pairWith(StreamStateEnabled, "", StreamStateEnabled, ""), StreamStatePause, "hold", true},
+		{"a legacy split pair heals", pairWith(StreamStateEnabled, "", StreamStateDisable, "stop"), StreamStateEnabled, "", true},
+		{"a pair signalled by SstpMethod alone compares both halves", methodOnlyPair, StreamStatePause, "hold", true},
+		{"a pair signalled by SstpInbound alone compares both halves", inboundOnlyPair, StreamStatePause, "hold", true},
+		{"a plain record matching its primary half is not a change", plain, StreamStatePause, "hold", false},
+		{"a plain record differing from its primary half is a change", plain, StreamStateDisable, "hold", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.IsStatusChange(tt.status, tt.reason); got != tt.want {
+				t.Errorf("IsStatusChange(%q, %q) = %v, want %v", tt.status, tt.reason, got, tt.want)
+			}
+		})
+	}
+}

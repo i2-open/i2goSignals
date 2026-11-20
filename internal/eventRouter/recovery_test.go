@@ -327,3 +327,46 @@ var _ StatusFetcher = (StatusFetcher)(nil)
 
 // keep require imported via at least one usage (other helpers above).
 var _ = require.NotNil
+
+// An operator's pause stored while the runner is in its own recovery pause
+// wins over the receiver's recovery: the loop writes nothing, leaves the
+// operator's status stored, and reports the stream as not resumed, so the
+// runner exits.
+func TestRecoveryLoop_OperatorPauseDuringRecoveryWins(t *testing.T) {
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
+	sid := stream.StreamConfiguration.Id
+	r.updateStream(stream, model.StreamStatePause, "5xx")
+
+	ctx := context.Background()
+	h.streamService.UpdateStreamStatus(ctx, sid, model.StreamStatePause, "operator hold")
+
+	clock := newFakeClock(time.Now())
+	fetcher := newFakeFetcher(fetchResult{status: &model.StreamStatus{Status: model.StreamStateEnabled}})
+	outcome := r.recoveryLoop(ctx, stream, RecoveryModeTransportBackoff, fetcher.fetch, newRecoveryTestConfig(clock))
+
+	assert.Equal(t, RecoveryOutcomeDisabled, outcome, "the runner does not resume")
+	persisted, err := h.streamService.GetStreamState(ctx, sid)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStatePause, persisted.Status)
+	assert.Equal(t, "operator hold", persisted.ErrorMsg, "the operator's status stays stored")
+}
+
+// With no operator change, the runner ends its own recovery pause itself.
+func TestRecoveryLoop_OwnPauseResumes(t *testing.T) {
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
+	sid := stream.StreamConfiguration.Id
+	r.updateStream(stream, model.StreamStatePause, "5xx")
+
+	clock := newFakeClock(time.Now())
+	fetcher := newFakeFetcher(fetchResult{status: &model.StreamStatus{Status: model.StreamStateEnabled}})
+	outcome := r.recoveryLoop(context.Background(), stream, RecoveryModeTransportBackoff, fetcher.fetch, newRecoveryTestConfig(clock))
+
+	assert.Equal(t, RecoveryOutcomeResumed, outcome)
+	persisted, err := h.streamService.GetStreamState(context.Background(), sid)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStateEnabled, persisted.Status)
+}

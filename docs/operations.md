@@ -17,11 +17,14 @@ behavior** once the system is running.
 1. [Delivery semantics invariant](#delivery-semantics-invariant)
 2. [Stream lifecycle and states](#stream-lifecycle-and-states)
 3. [Push delivery: failure classes and responses](#push-delivery-failure-classes-and-responses)
-4. [Receiver-status interrogation](#receiver-status-interrogation)
-5. [Idle keepalive (verify events)](#idle-keepalive-verify-events)
-6. [Operational events](#operational-events)
-7. [Recovery playbook](#recovery-playbook)
-8. [Configuration knobs](#configuration-knobs)
+4. [Ingest status codes (push receiver and SSTP acceptor)](#ingest-status-codes-push-receiver-and-sstp-acceptor)
+5. [Receiver-status interrogation](#receiver-status-interrogation)
+6. [Idle keepalive (verify events)](#idle-keepalive-verify-events)
+7. [Operational events](#operational-events)
+8. [Recovery playbook](#recovery-playbook)
+9. [Event retention](#event-retention)
+10. [Signing key selection](#signing-key-selection)
+11. [Configuration knobs](#configuration-knobs)
 
 ## Delivery semantics invariant
 
@@ -95,10 +98,31 @@ Terminal state for this side. Reached via one of:
   [RFC8935 protocol errors](#rfc8935-protocol-errors).)
 - **Remote `/status` reports `disabled`** — local side mirrors the remote's
   terminal state.
+- **No active signing key** — a signing push transmitter (any route mode but
+  `FW`) whose `iss` has no active key for its `signing_alg` sends nothing,
+  pauses with the reason `no active signing key for issuer <iss> (<alg>)`,
+  retries the key every `I2SIG_PUSH_AUTH_RETRY_DELAY`, and disables after
+  `I2SIG_PUSH_AUTH_RETRY_LIMIT` failed tries. It resumes by itself if the key
+  is created or reactivated first. Events stay queued throughout.
+- **No active signing key (poll transmitter or SSTP pair)** — the same rule,
+  with the pause stored on the stream. A poll gets `503` with a plain-text
+  body naming the issuer and algorithm; an SSTP exchange to this side gets
+  `503` and nothing in it is applied; a dialing SSTP pair sends nothing. The
+  stream (both directions of a pair) pauses with the reason
+  `<POLL-SRV|SSTP-SRV|SSTP-CLIENT>: no active signing key for issuer <iss> (<alg>)`
+  and `key_unavailable_since` set to the first failure. Every
+  `I2SIG_PUSH_AUTH_RETRY_DELAY` each node checks those streams: once the key
+  is active it re-enables them (a dialing pair's loop restarts); once
+  `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` has passed
+  since `key_unavailable_since` it disables them. An operator's status change
+  clears `key_unavailable_since`, so an operator pause is never resumed.
 
 `disabled` is the system's signal that **operator attention is required**.
 The stream's `ErrorMsg` field contains the diagnostic. Re-enabling the stream
-replays all unacked JTIs that accumulated while it was failing.
+starts delivery again on the node that handled the request, without a
+restart, and replays all unacked JTIs that accumulated while it was failing.
+Re-enabling a signing transmitter that still has no active signing key is
+refused with `400` and leaves the status unchanged.
 
 ## Push delivery: failure classes and responses
 
@@ -111,6 +135,7 @@ buckets below. The classification drives the response.
 | **Transport error** (DNS, refused, TLS, timeout) | network or cert problem | exp backoff; retry until cap; then `disabled` | `I2SIG_PUSH_RETRY_LIMIT` (6h default) |
 | **HTTP 5xx** (500/502/503/504) | server-side problem | same as transport error | 6h |
 | **HTTP 401 Unauthorized** | auth rejected | bounded retries with fixed delay; then `disabled` | `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` (10 × 15s default) |
+| **No active signing key** (nothing sent) | the transmitter's own key is missing, suspended or revoked | ERROR log; `paused`; retry the key with fixed delay; resume when it is back, else `disabled` | `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` (10 × 15s default) |
 | **HTTP 403 Forbidden** | auth forbidden | `disabled` immediately | — |
 | **HTTP 429 Too Many Requests** | rate-limited | honor `Retry-After`; if absent, exp backoff; **no cap** (peer back-pressure) | none |
 | **HTTP 4xx other** (404/410/422/...) | unexpected protocol | `disabled` + verbose log | — |
@@ -171,6 +196,32 @@ There is **no dead-letter path** for RFC8935 errors. Operationally, every
 RFC8935 §2.4 code reflects a configuration problem (wrong audience, wrong
 issuer, missing key, etc.) and the operator must intervene. See the
 [recovery playbook](#recovery-playbook) for how to triage.
+
+## Ingest status codes (push receiver and SSTP acceptor)
+
+The table above is the transmitter's view. When this server is the
+**receiver** — an RFC 8935 push receiver endpoint, or the SSTP acceptor at
+`POST /sstp/{id}` — it answers as follows. A SET that is not durably stored is
+never acknowledged (ADR 0038), and a store failure is reported as retryable so
+the sender keeps the SET instead of dropping it.
+
+| Situation | Push receiver (RFC 8935) | SSTP acceptor | Sender should |
+|---|---|---|---|
+| SET stored | `202 Accepted` | `200`, JTI in `ack` | treat as delivered |
+| Duplicate JTI (already stored, ADR 0017) | `202 Accepted` | `200`, JTI in `ack` | treat as delivered |
+| SET fails parsing, signature, audience or event validation | `400` with an RFC 8935 §2.4 `err` (e.g. `invalid_request`) | `200`, per-JTI entry in `setErrs`; the rest of the message is unaffected | not retry that SET |
+| Event store cannot durably store the SET | `503 Service Unavailable` + `Retry-After`, body `{"err":"temporarily_unavailable",...}` | `503 Service Unavailable` + `Retry-After` for the **whole exchange**; nothing in it is acked and no outbound SETs are returned | resend after `Retry-After` |
+
+`Retry-After` is `I2SIG_INGEST_RETRY_AFTER` seconds (default `2`).
+`temporarily_unavailable` is not an RFC 8935 §2.4 registry code; the `503`
+status and `Retry-After` header are the signal, and the code is informational.
+A goSignals push transmitter classifies this response as rate-limited
+back-pressure: it honours `Retry-After` and retries with no cap (see the table
+above).
+
+When the SSTP acceptor refuses an exchange, SETs in it that were stored before
+the failure are stored already. The sender resends them with the rest, they
+come back as duplicates, and they are acked then.
 
 ## Receiver-status interrogation
 
@@ -373,6 +424,211 @@ The system never invokes `ResetDate`/`ResetJti` on its own. Auto-recovery
 relies exclusively on the unacked-JTI mechanism (failed JTIs stay pending
 and replay automatically when the stream re-enables).
 
+## Event retention
+
+> **A community deployment keeps every data event forever.** Nothing in the
+> shipped configuration ever expires a data SET. That is intentional (ADR 0055),
+> not a defect — but it is *silent*, so an operator who never opts in does not
+> find out until the collections are already large. **Ping events are the one
+> exception:** they are purged 24 hours after they are stored (see
+> [below](#ping-events-are-purged-after-24-hours), ADR 0048).
+
+### Ping events are purged after 24 hours
+
+A **ping event** is an SSF Verification Event, whoever sent it: an idle
+keepalive or an operator-triggered verify this server transmits, or one it
+received from a peer. Pings are diagnostic, so they are not kept forever.
+
+- **What is purged.** A ping whose delivery record is *delivered* on a stream,
+  and its body in `events`, once the body was stored longer ago than
+  `I2SIG_PING_RETENTION` (default `24h`). A received ping that was never queued
+  to any stream is purged too. The clock is the time this server stored the
+  body, not the SET's `iat`.
+- **What is never purged.** A ping still **pending** on any stream keeps its
+  body and its pending record, even when it was delivered on another stream.
+  Data events are never touched; they follow their stream's retention (above).
+- **Who runs it.** One node per cluster, every 6 hours, under a cluster-wide
+  lease (`maintenance:ping-purge`). The lease row stores the last purge time,
+  so the next run is due 6 hours after it whichever node takes the lease, and
+  the stream-table reaper keeps that row. The first check runs 5 minutes after
+  start. The interval is fixed; only the retention is a setting.
+- **How it deletes.** Oldest first, in one-hour windows of stored time, with a
+  one-second pause between windows, so a large backlog does not become one
+  long delete or a replication-lag burst. A node that loses the lease or shuts
+  down stops between windows and records nothing; the next run picks up from
+  the oldest ping left.
+- **The first run after the upgrade drains the backlog.** A server that has
+  been storing pings since before this release has every one of them waiting.
+  The first run starts at the oldest ping and works forward one hour of stored
+  time per window, with the one-second pause between windows, so a backlog of
+  N hours takes at least N seconds of pauses on top of the deletes. A run that
+  stops (shutdown, lost lease) is not recorded, so the next check (every 15
+  minutes, or 5 minutes after a restart) resumes from the oldest ping left. Expect the `INFO` summary of the
+  first runs to report many windows and large counts; later runs report about
+  six windows.
+- **Pings stored before the upgrade.** Their bodies carry no stored-at time,
+  so the purge dates them by when they were inserted: the MongoDB ObjectId
+  `_id` time (memory store: the event's sort time). Their delivery records
+  carry no ping marker either. At startup, right after the
+  `pendingEvents`/`deliveredEvents` migration, one node (lease
+  `migration:ping-marker`) runs a one-shot backfill that marks the delivery
+  records of those pre-upgrade pings, in batches of 1000, and records a done
+  flag in the `migrations` collection; every later start finds the flag and
+  does nothing. A backfill that fails logs a `WARN`, does not stop the server,
+  and runs again at the next start. It logs
+  `ping delivery markers backfilled marked=<n>` when it marked anything. The
+  memory store derives the marker from the body when it loads its files.
+- **Index builds at the first start.** The release adds two partial indexes:
+  `{ping:1, state:1, createdAt:1}` on `deliveries` (ping records only) and
+  `{receivedAt:1}` on `events` (pings only). The server builds them at
+  startup, as it does every index. On a large store the first build reads the
+  whole collection once and takes time and I/O on the primary; build them in
+  a maintenance window beforehand (same keys and partial filters) to keep that
+  off the upgrade. The fallback query for pre-upgrade bodies uses the `_id`
+  index or the `events` ping index, never a collection scan.
+- **Turning it off.** `I2SIG_PING_RETENTION=0`. An unparseable or negative
+  value logs a `WARN` and uses `24h`.
+- **What it logs.** At startup, beside the event-retention summary line:
+
+    ```
+    level=INFO msg="ping retention 24h; purge every 6h, one node per cluster" component=PING-PURGE
+    ```
+
+    or `ping purge off (I2SIG_PING_RETENTION=0)`. After each run, one `INFO`
+    summary:
+
+    ```
+    level=INFO msg="Ping purge complete" component=PING-PURGE deliveries=1200 bodies=1180 windows=6 duration=2.1s cutoff=...
+    ```
+
+    A failed window or a lost lease logs a `WARN` and leaves the purge
+    unrecorded, so the next check retries. There are no metrics.
+- **Disk space is not returned; `compact` is an operator action.** MongoDB
+  keeps the space freed by deletes inside the collection files and reuses it
+  for new writes, so the files do not shrink after the first-run drain. The
+  purge never runs `compact`, and neither does anything else in the server. To return the space to the volume after a large purge, run
+  `compact` on `events` and `deliveries` yourself, one replica-set member at a
+  time, in a maintenance window (see the MongoDB `compact` documentation for
+  its locking on your server version).
+
+### Why nothing expires
+
+Retention is resolved per stream, in days, from the `retention_window_days`
+field on the stream state record. A `nil` or non-positive window means
+keep-forever, and `RetentionEngine.PurgeExpired` skips such a stream entirely.
+
+Two independent things hold community at keep-forever:
+
+1. **The default resolver is dormant.** `services.DefaultEffectiveWindow`
+   honours only the per-stream `retention_window_days` override, which is unset
+   unless somebody set it. There is no server-wide default window and no env var
+   that supplies one — the finite window is expected to come from the per-stream
+   override, or from an enterprise resolver that folds in an enrollment-bundle
+   default and cap.
+2. **No purge engine is bound.** `services.NewRetentionEngine` has no caller in
+   community. `dbProviders.Persistence.EventDAO` exposes the live event store
+   precisely so an embedder can bind one, but the community server does not. So
+   even a stream that *does* carry a window has nothing running to act on it.
+
+Because the second condition holds regardless of the first, **setting a window
+on a community server today changes nothing about what is stored.**
+
+### What it costs
+
+Both `events` (the global SET bodies) and `deliveredEvents` (the per-stream
+acked index) grow monotonically. One benchmark sweep of the dev cluster — 5000
+events, 16 concurrent clients — left roughly **274,000** documents in `events`
+and **263,000** in `deliveredEvents`. A long-running server ingesting
+continuously has no ceiling other than the volume it sits on.
+
+### There is no operator knob for it today
+
+`retention_window_days` is a goSignals operator field on the stream state
+record. It is deliberately **not** an RFC 8935 `StreamConfiguration` field, and
+unlike its sibling operator knobs — `default_subjects`, `subject_filter_mode`,
+`event_source`, `subject_removal_grace_seconds`, `event_validation` — it is
+**not** applied by `StreamService.CreateStream` or `StreamService.UpdateStream`,
+and the `goSignals` CLI exposes no flag for it. So there is no supported
+operator path in the community server: no API call, no CLI flag, no environment
+variable sets it.
+
+The field is persisted and round-trippable, so an **embedder** — code that links
+this server as a library rather than running the binary — can set it directly on
+the stream state record and update the stream through the DAO:
+
+```go
+// ssfModels.StreamStateRecord.RetentionWindowDays is *int:
+//   nil  => keep forever (the community default)
+//   0    => keep forever, stated explicitly
+//   n>0  => retain for n days
+days := 30
+rec.RetentionWindowDays = &days
+err := streamDAO.Update(ctx, rec)
+```
+
+Setting it changes what `RetentionEngine.PurgeExpired` *would* purge. It does
+not by itself cause anything to expire, because no purge engine is bound in this
+build — see the section above. Treat the field as forward-compatible
+configuration, not as an enforcement switch.
+
+Binding the retention engine to the running store, and with it a real operator
+knob, is the subject of planning issue
+[independentid/i2gosignals-planning#75](https://github.com/independentid/i2gosignals-planning/issues/75)
+(event-family retention, ADR 0055 Amendments 7-8). It is not part of this build.
+
+### What an operator should do instead
+
+- **Size for unbounded growth.** Capacity-plan the MongoDB volume against
+  `events` + `deliveredEvents` at your steady-state ingest rate, and alarm on
+  volume utilisation rather than on document counts.
+- **Check the startup line.** Every server logs its retention summary once at
+  startup, at `INFO`:
+
+    ```
+    level=INFO msg="Event retention summary: no purge engine is bound, so no event expires"
+        streams=12 keep_forever=12 windowed=0 doc=docs/operations.md#event-retention
+    ```
+
+    `keep_forever` is the count of configured streams with no finite window.
+    The counts are informational: with no engine bound, `windowed` streams do
+    not expire either.
+- **Prune out of band if you must.** Any manual cleanup of `events` /
+  `deliveredEvents` is unsupported and must respect the refcount rule the purge
+  engine encodes — a body in `events` may only be deleted once **no** stream
+  still references its JTI, pending or delivered. Deleting a body that a stream
+  still has pending loses an undelivered event.
+- **Run the enterprise superset** if you need enforced retention: it supplies
+  the resolver (bundle default + cap) and binds the purge engine to the live
+  store.
+- **Do not mistake `I2SIG_TOKEN_RETENTION` for event retention.** That variable
+  governs the management-plane *token* collection only. See
+  `docs/configuration_properties.md`.
+
+## Signing key selection
+
+An issuer signs SETs, and the token issuer signs auth tokens, with its newest
+active key of the algorithm in use. Newest means the latest creation time: the
+server stamps one on every key record it creates, rotates or loads, and a
+suspend, reactivate or revoke never changes it. A record with a creation time is
+newer than any record without one, and records without one, or created in the
+same millisecond, are ordered by record id. See ADR 0028.
+
+### Upgrading a store from v0.11.0 through v0.12.0-alpha.19
+
+Key records minted by those versions carry random record ids and no creation
+time. Upgrading needs no migration, and nothing re-stamps existing records.
+
+- **The first rotation after upgrading selects the new key at once.** The same
+  holds for creating or loading a key alongside an older key of the same
+  algorithm. Transmitters sign with the new `kid` straight away, and every node
+  follows within its 2s signing-key cache expiry. Suspending the old key is no
+  longer needed to complete a rotation.
+- **Records minted before the upgrade keep their relative order among
+  themselves.** Each issuer signs with the same key after the upgrade as
+  before it. A rotation made *before* the upgrade is still decided by record
+  id, so an issuer can still be signing with its old `kid`; to move it to the
+  newer key, rotate again or suspend the old key.
+
 ## Configuration knobs
 
 The push state machine is tuned via the following environment variables.
@@ -385,8 +641,8 @@ poll-side analogues.
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR` | `2.0` | Multiplier per retry attempt |
 | `I2SIG_PUSH_RETRY_MAX_DELAY` | `5m` | Cap on individual sleep |
 | `I2SIG_PUSH_RETRY_LIMIT` | `6h` | Total elapsed time before transport recovery exits to `disabled` |
-| `I2SIG_PUSH_AUTH_RETRY_LIMIT` | `10` | Max 401 retry attempts before `disabled` |
-| `I2SIG_PUSH_AUTH_RETRY_DELAY` | `15s` | Sleep between 401 retries |
+| `I2SIG_PUSH_AUTH_RETRY_LIMIT` | `10` | Max 401 retry attempts, and max signing-key retries, before `disabled` |
+| `I2SIG_PUSH_AUTH_RETRY_DELAY` | `15s` | Sleep between 401 retries, and between signing-key retries |
 | `I2SIG_PUSH_PROBE_INTERVAL` | `30s` | Cadence of `/status` re-checks while in `paused` |
 | `I2SIG_PUSH_KEEPALIVE_INTERVAL` | `5m` | Idle threshold before generating a verify-event keepalive |
 
@@ -394,6 +650,12 @@ The existing `I2SIG_PUSH_BACKFILL_INTERVAL` and
 `I2SIG_PUSH_BACKFILL_BATCH` continue to govern active-mode buffer
 refilling — they are independent of the recovery state machine and remain at
 their previous defaults.
+
+Cluster lease ownership (#364) is tuned by one variable:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `I2SIG_LEASE_SAFETY_MARGIN` | `5s` | How long before a lease's recorded expiry a node stops acknowledging as its owner (Go duration). It covers clock drift and the time an acknowledgement batch takes to reach the store. A value over half the lease duration is capped at half (15s for the 30s production leases) and logged once at WARN; a negative value is treated as `0` and logged at WARN; an unparsable value falls back to the default |
 
 ---
 

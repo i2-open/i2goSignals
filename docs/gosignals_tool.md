@@ -491,6 +491,7 @@ Parameters Used to Create Streams:
 | `--connect`, `-c` | Partially automates stream creation by providing the local alias for the stream being connected to.                                          | none                                             |
 | `--tx-alias`      | (Poll receiver) Alias of a configured foreign SSF transmitter to auto-register and wire. **Requires an ADMIN credential, not the IAT** — it registers the transmitter on the node (`POST /server`, admin-only) and provisions a stream against it. | none                                             |
 | `--secret`        | OAuth client secret for the `--tx-alias` transmitter (non-interactive); resolved staged → flag → env. Rides on the request body only; never persisted. | none                                             |
+| `--allow-plaintext` | (Push publisher, poll receiver, push/poll connection, sstp) Opts the stream this server **dials** out of the business-stream TLS floor so `--event-url` (or the SSTP peer) may be plain `http://`. Sets `tx_allow_plaintext` on the stream; without it an `http://` endpoint is refused with `400`. Loopback/dev only. | `false`                                          |
 
 > [!Tip]
 > For more information on the meaning of terms like iss, aud, and event URIs, see the [JWT Specification](https://datatracker.ietf.org/doc/html/rfc7519), 

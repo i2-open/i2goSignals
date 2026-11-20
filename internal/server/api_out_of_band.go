@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -19,24 +20,43 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
+
+// syncTokenKey points the application's AuthIssuer at a new key for keyName
+// when keyName is its token issuer. Auth tokens are signed RS256, so only an
+// RSA key (alg) applies, and a nil key is ignored. It applies only while
+// GetAuth() is KeyService's own issuer: a surface given an explicit Auth (#376)
+// manages that issuer's keys itself, so a KeyService key change must not
+// replace its signing key or drop the public keys it holds for tokens it
+// already issued.
+func syncTokenKey(sa SsfApplicationInterface, keyName, kid, alg string, key crypto.Signer) {
+	if key == nil || !isRSAKeyAlg(alg) {
+		return
+	}
+	ks := sa.GetKeyService()
+	auth := sa.GetAuth()
+	if ks == nil || auth == nil || auth != ks.GetAuthIssuer() || auth.TokenIssuer != keyName {
+		return
+	}
+	auth.UpdateTokenKey(keyName, kid, key, ks.GetAuthValidatorPubKey())
+}
 
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
 // remain available when JwksJsonIssuer is requested.
-func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	RotateIssuerHandler(sa, w, r, authCtx)
 }
 
-func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	// This function is called by CreateJwksIssuer so authentication has already been checked.
 
 	vars := mux.Vars(r)
@@ -46,19 +66,33 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	issuer, _ := url.QueryUnescape(rawIssuer)
 
-	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, authCtx.ProjectId)
+	// alg selects the one signature algorithm rotated; the issuer's keys of
+	// other algorithms are untouched (i2goSignals#314). Absent means the
+	// default key type (I2SIG_KEY_ALG, spec #114).
+	alg := requestKeyAlg(sa, r)
+	if err := services.ValidateKeyAlg(alg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	lifetime, err := keyLifetimeOptions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, alg, authCtx.ProjectId, lifetime...)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// If the rotated issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer {
-		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
-	}
+	syncTokenKey(sa, issuer, kid, alg, issuerKey)
 
-	// Update the router with the new key/kid
+	// Drop the issuer's cached signing keys, so this node signs with the rotated
+	// key the next time it signs (#313), then preload it.
+	invalidateIssuerSigningKeys(sa, issuer)
 	if sa.GetEventRouter() != nil {
 		sa.GetEventRouter().UpdateStreamState(&model.StreamStateRecord{
 			StreamConfiguration: model.StreamConfiguration{
@@ -83,6 +117,7 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		})
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.Header().Set(services.KeyIdHeader, kid)
 	w.WriteHeader(http.StatusOK)
 	_, err = w.Write(keyPemBytes)
 	if err != nil {
@@ -96,10 +131,25 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 //
 // Inputs:
 //   - keyName (path): The name of the key to create or load.
+//   - alg (query): Optional. The signature algorithm of the key to create, rotate
+//     or replace: RS256, ES256 or ML-DSA-65; absent means the default key type
+//     (I2SIG_KEY_ALG, ES256 unless configured); any other value is a 400.
+//     Keys of other algorithms under keyName are left alone.
+//   - force (query): Optional. 'rotate' adds a new key of alg; 'replace' deletes
+//     keyName's keys of alg, then creates one. Without force, an existing
+//     non-revoked key of alg is a 409.
 //
 // Return values:
-//   - 201 Created: (If generating) PEM-encoded private key.
+//   - 201 Created: (If generating) PEM-encoded private key. Every minting
+//     response (create, replace, rotate) carries the new key's kid in the
+//     Key-Id header.
 //   - 200 OK: (If loading or rotating) PEM-encoded private key or success message.
+//
+// Errors:
+//   - 409 Conflict: the key exists and no force is given, or a force=replace
+//     would leave a signing transmitter with no active signing key for its
+//     algorithm (#311), with a KeyChangeConflict JSON body. Resending with
+//     confirm=true replaces anyway.
 func (sa *SignalsApplication) CreateKey(w http.ResponseWriter, r *http.Request) {
 	CreateKeyHandler(sa, w, r)
 }
@@ -154,7 +204,7 @@ func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 // applies to OAuth/STS callers too: an Eat-only check returned false for them
 // (Eat==nil), which silently exempted an OAuth key-only caller from the
 // create-only guard and granted full key takeover/upload (see #128, #139, #150).
-func keyScopeOnly(authCtx *authUtil.AuthContext) bool {
+func keyScopeOnly(authCtx *authSupport.AuthContext) bool {
 	if authCtx == nil {
 		return false
 	}
@@ -179,7 +229,23 @@ func requestIsKeyTakeover(r *http.Request) bool {
 	return false
 }
 
-func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+// keyLifetimeOptions reads the optional lifetime query parameter of a key
+// create, rotate or cert-less upload (#318): a number of days ("90d"), a Go
+// duration, or 0/never for a key that does not expire. Absent means the global
+// default (I2SIG_ISSUER_KEY_LIFETIME).
+func keyLifetimeOptions(r *http.Request) ([]services.KeyOption, error) {
+	q := r.URL.Query()
+	if !q.Has("lifetime") {
+		return nil, nil
+	}
+	d, err := services.ParseKeyLifetime(q.Get("lifetime"))
+	if err != nil {
+		return nil, err
+	}
+	return []services.KeyOption{services.WithLifetime(d)}, nil
+}
+
+func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	vars := mux.Vars(r)
 	rawKeyName := vars["keyName"]
 	if rawKeyName == "" {
@@ -198,10 +264,32 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 	force := queryParams.Get("force")
 	_, rotate := queryParams["rotate"]
 
-	// Check if key already exists
-	if checkKeyNameExists(sa, keyName) {
+	// alg selects the signature algorithm this request acts on: RS256, ES256 or
+	// ML-DSA-65, the default key type (I2SIG_KEY_ALG) when absent. Create,
+	// rotate and replace each touch only that algorithm's keys, so an issuer
+	// can hold one of each (the dual-key JWKS of ADR 0034; i2goSignals#314).
+	alg := requestKeyAlg(sa, r)
+	if err := services.ValidateKeyAlg(alg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	lifetime, err := keyLifetimeOptions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// A key of the requested algorithm that is not revoked is a conflict unless
+	// force (or ?rotate) says what to do with it.
+	exists, err := sa.GetKeyService().KeyExistsForAlg(r.Context(), keyName, alg)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error checking existing keys for %s: %v", keyName, err))
+		http.Error(w, "Error checking existing keys", http.StatusInternalServerError)
+		return
+	}
+	if exists {
 		if force == "" && !rotate {
-			http.Error(w, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
+			http.Error(w, fmt.Sprintf("Key already exists for algorithm %s. Use query parameter force=replace or force=rotate", keyAlgLabel(alg)), http.StatusConflict)
 			return
 		}
 
@@ -209,28 +297,34 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 			RotateIssuerHandler(sa, w, r, authCtx)
 			return
 		}
+	}
 
-		if force == "replace" {
-			err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
-			if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
-				serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
-				http.Error(w, "Error replacing existing keys", http.StatusInternalServerError)
-				return
-			}
+	if force == "replace" {
+		// Replace deletes only the keys of the requested algorithm and creates
+		// one signing key of it (#314); the guard (#311) is told exactly that.
+		change := services.KeyChange{Retires: services.RetireAlg(alg), Adds: []string{keyAlgLabel(alg)}}
+		if refuseStrandingKeyChange(sa, w, r, keyName, "replacing", change) {
+			return
+		}
+		err := sa.GetKeyService().DeleteKeysByNameAndAlg(r.Context(), keyName, alg)
+		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+			serverLog.Error(fmt.Sprintf("Error deleting existing %s keys for %s: %v", keyAlgLabel(alg), keyName, err))
+			http.Error(w, "Error replacing existing keys", http.StatusInternalServerError)
+			return
 		}
 	}
 
-	issuerKey, err := sa.GetKeyService().CreateKeyPair(r.Context(), keyName, "sig", authCtx.ProjectId)
+	issuerKey, kid, err := sa.GetKeyService().CreateKeyPairForAlg(r.Context(), keyName, alg, "sig", authCtx.ProjectId, lifetime...)
+	// A create, or a replace whose delete has already run, changes the issuer's
+	// signing keys even when the create fails (#313).
+	invalidateIssuerSigningKeys(sa, keyName)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", keyName, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
 		return
 	}
 
-	// If the created issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName {
-		sa.GetAuth().UpdateTokenKey(keyName, keyName, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
-	}
+	syncTokenKey(sa, keyName, kid, alg, issuerKey)
 
 	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
 	if err != nil {
@@ -244,6 +338,9 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 			Bytes: pkcs8bytes,
 		})
 
+	// The kid travels in a header, not the PEM: a client strips only the
+	// BEGIN/END lines, so a PEM header would corrupt its key (spec #114).
+	w.Header().Set(services.KeyIdHeader, kid)
 	w.WriteHeader(http.StatusCreated)
 	_, err = w.Write(keyPemBytes)
 	if err != nil {
@@ -256,8 +353,10 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 //
 // Inputs:
 //   - issuer (path): The name of the issuer for which to load the key. This will become the kid in the certificates and matches certificate 'iss' values.
-//   - force (query): Optional. If 'replace', all existing keys for the issuer are deleted before adding the new key.
+//   - force (query): Optional. If 'replace', the issuer's existing RSA keys are deleted before adding the new key
+//     (keys of other algorithms are kept).
 //     If 'rotate', a new unique kid is generated and added to the set of keys for the issuer.
+//   - confirm (query): Optional. 'true' lets a force=replace go ahead when it would strand signing transmitters (#311).
 //   - use (query): Optional. Specifies the intended use of the key. Acceptable values are 'sig' (signing) or 'enc' (encryption). Defaults to 'sig'.
 //   - Content-Type (header): Must be one of 'application/x-pem-file', 'application/pkix-cert', or 'application/pkcs7-mime'.
 //   - Request body: The key data in PEM or DER format.
@@ -268,7 +367,10 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 // Errors:
 //   - 400 Bad Request: Error reading body, invalid PEM data, invalid certificate, or unsupported key type.
 //   - 403 Forbidden: Invalid permissions.
-//   - 409 Conflict: Key already exists without force parameter.
+//   - 409 Conflict: Key already exists without force parameter, or a
+//     force=replace would leave a signing transmitter with no active signing
+//     key for its algorithm (#311): a KeyChangeConflict JSON body listing the
+//     streams. Resending with confirm=true (query) replaces anyway.
 //   - 500 Internal Server Error: Error saving the key.
 func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
 	LoadKeyHandler(sa, writer, request)
@@ -297,7 +399,7 @@ func CreateKeyNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *
 	createKeyByNameHandler(sa, w, r, authCtx)
 }
 
-func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request, authCtx *authUtil.AuthContext, body []byte) {
+func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request, authCtx *authSupport.AuthContext, body []byte) {
 	ctx := request.Context()
 	vars := mux.Vars(request)
 	rawKeyName := vars["keyName"]
@@ -308,16 +410,53 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	queryParams := request.URL.Query()
 	force := queryParams.Get("force")
 
-	if checkKeyNameExists(sa, keyName) && force == "" {
+	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
+	contentType = strings.TrimSpace(contentType)
+
+	// The uploaded key's algorithm scopes the conflict check and a replace, which
+	// leave the keyName's keys of other algorithms in place (i2goSignals#314).
+	// JWKS URIs and PKCS#1 public keys are RSA (RS256); a PEM key or a
+	// certificate may also be ES256 or ML-DSA-65, and a PEM private key may come
+	// with its certificate (#318), so those are read first.
+	uploadAlg := "RS256"
+	var bundle *pemBundle
+	switch contentType {
+	case "application/x-pem-file", "application/pkix-cert":
+		parse := parsePemBundle
+		if contentType == "application/pkix-cert" {
+			parse = parsePkixUpload
+		}
+		var err error
+		if bundle, err = parse(body); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		uploadAlg = bundle.alg
+	}
+	// A cert-less private key takes the lifetime query parameter (#318).
+	lifetime, err := keyLifetimeOptions(request)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	exists, existsErr := sa.GetKeyService().KeyExistsForAlg(ctx, keyName, uploadAlg)
+	if existsErr != nil {
+		serverLog.Error(fmt.Sprintf("Error checking existing keys for %s: %v", keyName, existsErr))
+		http.Error(writer, "Error checking existing keys", http.StatusInternalServerError)
+		return
+	}
+	if exists && force == "" {
 		http.Error(writer, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
 		return
 	}
 
-	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
-	contentType = strings.TrimSpace(contentType)
-
-	var priv *rsa.PrivateKey
-	var pub *rsa.PublicKey
+	// priv is declared as the interface, not *rsa.PrivateKey, so the
+	// public-key-only paths below leave it as an untyped nil. A nil
+	// *rsa.PrivateKey boxed into a crypto.Signer would read as present at
+	// AddKey's "privateKey != nil" check and panic on Public().
+	var priv crypto.Signer
+	var pub crypto.PublicKey
 
 	switch contentType {
 	case "application/json":
@@ -342,6 +481,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		if err != nil {
 			msg := fmt.Sprintf("Error getting jwks for keyName %s: %v", keyName, err)
 			http.Error(writer, msg, http.StatusBadRequest)
+			return
 		}
 
 		use := "sig"
@@ -358,55 +498,11 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		writer.WriteHeader(http.StatusOK)
 		return
 
-	case "application/x-pem-file":
-		block, _ := pem.Decode(body)
-		if block == nil {
-			http.Error(writer, "Invalid PEM data", http.StatusBadRequest)
-			return
-		}
-		if block.Type == "PRIVATE KEY" || block.Type == "RSA PRIVATE KEY" {
-			if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-				priv = key
-				pub = &key.PublicKey
-			} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-				if rsaKey, ok := key.(*rsa.PrivateKey); ok {
-					priv = rsaKey
-					pub = &rsaKey.PublicKey
-				}
-			}
-		} else if block.Type == "PUBLIC KEY" || block.Type == "RSA PUBLIC KEY" {
-			if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
-				pub = key
-			} else if key, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
-				if rsaKey, ok := key.(*rsa.PublicKey); ok {
-					pub = rsaKey
-				}
-			}
-		} else if block.Type == "CERTIFICATE" {
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				http.Error(writer, "Invalid certificate", http.StatusBadRequest)
-				return
-			}
-			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
-				pub = rsaKey
-			}
-		}
-
-	case "application/pkix-cert":
-		// Try parsing as certificate first
-		cert, err := x509.ParseCertificate(body)
-		if err == nil {
-			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
-				pub = rsaKey
-			}
+	case "application/x-pem-file", "application/pkix-cert":
+		if bundle.priv != nil {
+			priv = bundle.priv
 		} else {
-			// Try parsing as PKIX public key
-			if key, err := x509.ParsePKIXPublicKey(body); err == nil {
-				if rsaKey, ok := key.(*rsa.PublicKey); ok {
-					pub = rsaKey
-				}
-			}
+			pub = bundle.pub
 		}
 
 	case "application/pkcs7-mime":
@@ -423,14 +519,26 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	kid := ""
 	if force == "replace" {
-		err := sa.GetKeyService().DeleteKeysByName(ctx, keyName)
+		// The guard (#311) describes exactly this replace: the name's keys of the
+		// upload's algorithm are deleted (#314), and the upload is a signing key
+		// only when it carries a private half whose certificate, if any, is valid
+		// now (#318).
+		change := services.KeyChange{Retires: services.RetireAlg(uploadAlg)}
+		if priv != nil && sa.GetKeyService().UploadedKeySignsNow(keyName, bundle.cert) {
+			change.Adds = []string{uploadAlg}
+		}
+		if refuseStrandingKeyChange(sa, writer, request, keyName, "replacing", change) {
+			return
+		}
+		err := sa.GetKeyService().DeleteKeysByNameAndAlg(ctx, keyName, uploadAlg)
 		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 			serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
 			http.Error(writer, "Error replacing existing keys", http.StatusInternalServerError)
 			return
 		}
-	} else if force == "rotate" {
-		kid = fmt.Sprintf("%s-%s", keyName, bson.NewObjectID().Hex())
+	} else if force == "rotate" && isRSAKeyAlg(uploadAlg) {
+		// An ES256 or ML-DSA-65 key always gets a unique kid from the service.
+		kid = fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
 	}
 
 	use := queryParams.Get("use")
@@ -441,68 +549,203 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	err := sa.GetKeyService().AddKey(ctx, keyName, use, kid, priv, pub, authCtx.ProjectId)
+	if priv != nil {
+		// A private key is a signing key with a validity period: its
+		// certificate's, else from now for the lifetime (#318).
+		kid, err = sa.GetKeyService().StoreUploadedSigningKey(ctx, keyName, use, kid, priv, bundle.cert, authCtx.ProjectId, lifetime...)
+	} else {
+		kid, err = sa.GetKeyService().AddVerificationKey(ctx, keyName, use, kid, pub, authCtx.ProjectId)
+	}
+	// A load, rotate or replace changes the issuer's signing keys; a replace's
+	// delete has run even when the add fails (#313).
+	invalidateIssuerSigningKeys(sa, keyName)
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
 	}
 
-	// If the loaded issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && priv != nil {
-		// Update the kid for the token issuer if not set
-		if kid == "" {
-			kid = keyName
-		}
-		sa.GetAuth().UpdateTokenKey(keyName, kid, priv, sa.GetKeyService().GetAuthValidatorPubKey())
-	}
+	syncTokenKey(sa, keyName, kid, uploadAlg, priv)
 
 	writer.WriteHeader(http.StatusOK)
 }
 
-// DeleteKey deletes the keys associated with a specified issuer.
-//
-// Inputs:
-//   - issuer (path): The name of the issuer whose keys are to be deleted.
-//
-// Return values:
-//   - 200 OK: Issuer keys successfully deleted.
-//
-// Errors:
-//   - 403 Forbidden: Invalid permissions.
-//   - 404 Not Found: Issuer keys not found.
-//   - 500 Internal Server Error: Error during deletion process.
-func (sa *SignalsApplication) DeleteKey(w http.ResponseWriter, r *http.Request) {
-	DeleteJwksIssuerKeyHandler(sa, w, r)
+// KeyStatusResponse is the body returned by POST /key/{keyName}/status: the
+// refreshed per-kid summary plus a non-empty Warning when the transition left
+// the keyName with no active signing key (ADR 0028).
+type KeyStatusResponse struct {
+	Summary interfaces.KeySummary `json:"summary"`
+	Warning string                `json:"warning,omitempty"`
 }
 
-func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+// SetKeyStatus implements the key revoke/suspend primitive: a non-destructive
+// lifecycle transition (active/suspended/revoked) over one or all records under
+// a keyName. Unlike the removed hard-delete surface, the key material and audit
+// trail are retained. See community ADR 0028.
+//
+// Inputs:
+//   - keyName (path): the issuer/keyName whose records are transitioned.
+//   - body: SetKeyStatusRequest {status, kid?}. Omitting kid affects all
+//     records under keyName; a supplied kid must belong to keyName.
+//
+// Return values:
+//   - 200 OK: KeyStatusResponse (updated summary + optional warning).
+//
+// Errors:
+//   - 400 Bad Request: malformed body, invalid status, or a transition away
+//     from the terminal revoked state.
+//   - 403 Forbidden: caller lacks stream_admin/root (the bare "key" scope is
+//     denied — status mutation is takeover-class, ADR 0006).
+//   - 404 Not Found: keyName has no records, or the supplied kid does not
+//     belong to keyName.
+//   - 409 Conflict: a suspend would leave a signing transmitter with no active
+//     signing key for its algorithm (#311). The body is a KeyChangeConflict
+//     listing the streams; resending with confirm=true (query) suspends anyway.
+//     A revoke or a reactivate is never refused.
+func (sa *SignalsApplication) SetKeyStatus(w http.ResponseWriter, r *http.Request) {
+	SetKeyStatusHandler(sa, w, r)
+}
+
+func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	// Status mutation is takeover-class: only stream_admin/root, never the bare
+	// "key" scope (ADR 0006's create-allowed / takeover-denied line).
 	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
 	}
+
 	vars := mux.Vars(r)
 	rawKeyName := vars["keyName"]
 	if rawKeyName == "" {
 		rawKeyName = vars["issuer"]
 	}
-	keyName, _ := url.QueryUnescape(rawKeyName)
-	err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
+	keyName, err := url.QueryUnescape(rawKeyName)
 	if err != nil {
-		serverLog.Error("Error deleting keys for keyName", keyName, err.Error())
-		if errors.Is(err, interfaces.ErrKeyNotFound) {
-			http.Error(w, "Key not found", http.StatusNotFound)
+		http.Error(w, "Error malformed keyName encoding", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+	var req model.SetKeyStatusRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// A suspend that would strand signing transmitters needs ?confirm=true
+	// (#311). A revoke never does: it is the response to a leaked key.
+	if req.Status == interfaces.KeyStatusSuspended {
+		change := services.KeyChange{Retires: services.RetireAllKeys}
+		if req.Kid != "" {
+			change.Retires = services.RetireKid(req.Kid)
+		}
+		if refuseStrandingKeyChange(sa, w, r, keyName, "suspending", change) {
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	summary, warning, err := sa.GetKeyService().SetKeyStatus(r.Context(), keyName, req.Kid, req.Status)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrKeyStatusInvalid), errors.Is(err, services.ErrKeyStatusTerminal):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, interfaces.ErrKeyNotFound):
+			http.Error(w, "Key not found", http.StatusNotFound)
+		default:
+			serverLog.Error("Error setting key status", "keyName", keyName, "error", err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Flush the event router's cached signing key for this issuer so outbound SET
+	// signing stops using a just-revoked/suspended kid. SetKeyStatus already
+	// refreshed the auth-plane key; the event plane caches issuer keys separately.
+	invalidateIssuerSigningKeys(sa, keyName)
+
+	resp := KeyStatusResponse{Warning: warning}
+	if summary != nil {
+		resp.Summary = summary.AdjustBase(sa.GetBaseUrl())
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	out, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "Error marshalling response", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	return
+	_, _ = w.Write(out)
+}
+
+// invalidateIssuerSigningKeys drops the event router's cached signing keys for
+// keyName, for every algorithm, after a key change handled on this node: a
+// rotate, a replace or load, or a status change. This node then signs with the
+// result the next time it signs; every other node picks the change up within its
+// key cache's 2s expiry (#313). The real router implements InvalidateIssuerKey;
+// the admin-route surface, which holds no key cache, does not — hence the
+// capability check (ADR 0028).
+func invalidateIssuerSigningKeys(sa SsfApplicationInterface, keyName string) {
+	if er := sa.GetEventRouter(); er != nil {
+		if inv, ok := er.(interface{ InvalidateIssuerKey(string) }); ok {
+			inv.InvalidateIssuerKey(keyName)
+		}
+	}
+}
+
+// KeyChangeConflict is the 409 body of a key suspend or replace refused because
+// it would leave signing transmitters with no active signing key (#311). Streams
+// lists them; i2goSignalsAdmin reads it to offer the confirmation.
+type KeyChangeConflict struct {
+	Error   string                    `json:"error"`
+	Streams []services.StrandedStream `json:"streams"`
+}
+
+// keyChangeConfirmed reports whether the caller resent a guarded key change with
+// ?confirm=true. Any other value counts as absent.
+func keyChangeConfirmed(r *http.Request) bool {
+	return r.URL.Query().Get("confirm") == "true"
+}
+
+// refuseStrandingKeyChange is the #311 guard, run before a key suspend or
+// replace is made. When change would leave a signing transmitter with no active
+// signing key for its algorithm, and the caller has not confirmed, it writes a
+// 409 KeyChangeConflict and reports true; nothing has changed and the handler
+// must return. It also reports true after writing a 500 when the streams or keys
+// could not be read. action names the change in the error ("suspending").
+func refuseStrandingKeyChange(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, keyName, action string, change services.KeyChange) bool {
+	if keyChangeConfirmed(r) || sa.GetStreamService() == nil {
+		return false
+	}
+	algs, stranded, err := sa.GetStreamService().StrandedByKeyChange(r.Context(), keyName, change)
+	if err != nil {
+		serverLog.Error("Error checking the signing transmitters of a key change", "keyName", keyName, "error", err)
+		http.Error(w, "Error checking the streams that sign with this key", http.StatusInternalServerError)
+		return true
+	}
+	if len(stranded) == 0 {
+		return false
+	}
+	body, err := json.Marshal(KeyChangeConflict{
+		Error: fmt.Sprintf("%s key %s would leave no active signing key for %s, which the listed signing transmitters use; resend with confirm=true to proceed",
+			action, keyName, strings.Join(algs, ", ")),
+		Streams: stranded,
+	})
+	if err != nil {
+		http.Error(w, "Error marshalling response", http.StatusInternalServerError)
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusConflict)
+	_, _ = w.Write(body)
+	return true
 }
 
 func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
-	jwks, err := keyfunc.NewJSON(*jwksJson)
+	jwks, err := goSet.NewJwksWithAKP(*jwksJson)
 	if err != nil {
 		return nil, err
 	}
@@ -640,13 +883,12 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// /register. A self-registration caps at stream_mgmt + event_delivery; an
 	// admin client is provisioned out of band, not via the registration door.
 	//
-	// event_delivery granted here is persisted in the client's AllowedScopes as a
-	// capability, but is intentionally NOT minted into the stream-client
-	// (management) token (see services.ClientService.RegisterClient and
-	// authUtil.IssueStreamClientToken). Event delivery is authorized by a separate
-	// per-stream delivery token (authUtil.IssueStreamToken), issued at stream
-	// creation. The stored-capability vs minted-token-role divergence is by design
-	// (#140); do not reconcile it by adding event to the management token.
+	// event_delivery granted here is persisted in the client's AllowedScopes and
+	// is also minted into the issued token as a role (see
+	// services.ClientService.RegisterClient and authSupport.IssueStreamClientToken),
+	// so a single registered token can both manage a stream and poll/receive its
+	// events. (A per-stream delivery token, authSupport.IssueStreamToken, is still
+	// issued at stream creation for counterparties that authenticate per stream.)
 	var scopes []string
 	if len(jsonRequest.Scopes) == 0 {
 		scopes = append(scopes, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
@@ -676,7 +918,7 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		Email:         jsonRequest.Email,
 		Description:   jsonRequest.Description,
 		AllowedScopes: scopes,
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 	}
 
 	// The redeemed IAT's JTI is this client token's lineage parent (ADR 0007).
@@ -693,7 +935,7 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	// Best-effort IAT redemption capture: a /register call is a redemption of
 	// the IAT (ADR 0007). A write failure logs at WARN and never blocks
-	// registration, matching the TrackToken posture.
+	// registration, matching the TrackToken behavior.
 	if parentJTI != "" {
 		remoteIP := model.BuildRemoteIPFromRequest(r).String()
 		if err := sa.GetTokenService().RecordRedemption(r.Context(), parentJTI, remoteIP, time.Now().UTC()); err != nil {
@@ -706,16 +948,27 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
-// TriggerEvent is a placeholder handler for triggering events manually. (Not currently implemented)
+// TriggerEvent injects an event into the named stream. Intended for
+// administrative/test use (notably the SSF conformance suite's CAEP-interop
+// module, which expects an operator-driven event during its delivery wait).
+//
+// Accepted bearers (any one of):
+//   - admin / root client token (out-of-band provisioning)
+//   - key-scope bootstrap bearer (I2SIG_BOOTSTRAP_TOKEN). The bootstrap secret
+//     already controls the SUT's signing keys and IATs; letting it also drive
+//     this endpoint lets the conformance harness fire CAEP events without an
+//     extra admin-client provisioning step.
 //
 // Return values:
-//   - 501 Not Implemented
+//   - 200 OK on success
+//   - 401/403 on auth failures
+//   - 400 on malformed body, 404 if the stream id is unknown
 func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
 	TriggerEventHandler(sa, w, r)
 }
 
 func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot, authSupport.ScopeKey})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -725,6 +978,7 @@ func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		StreamID  string         `json:"stream_id"`
 		EventType string         `json:"event_type"`
 		Subject   map[string]any `json:"subject"`
+		EventData map[string]any `json:"event_data"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -752,11 +1006,24 @@ func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		_ = json.Unmarshal(subBytes, &subject.SubjectIdentifier)
 	}
 
+	// RFC8417 §2.2: each event-type key in `events` MUST map to a JSON object.
+	// Default to an empty object when the caller did not supply event_data.
+	eventData := req.EventData
+	if eventData == nil {
+		eventData = map[string]any{}
+	}
 	set := goSet.CreateSet(subject, state.Iss, state.Aud)
-	set.AddEventPayload(req.EventType, nil)
+	set.AddEventPayload(req.EventType, eventData)
 
-	// HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
-	if err := sa.GetEventRouter().HandleEvent(&set, "", state.Id.Hex()); err != nil {
+	// Submit directly to the requested stream and bypass the global
+	// MatchesStream fanout: an injected event is targeted at one stream by
+	// design. The fanout path is correct for inbound forwarding but would
+	// also deliver this synthetic event to every other registered stream
+	// whose subscription happens to overlap (same issuer/audience/event
+	// type) — including stale streams that earlier conformance modules left
+	// behind without authorization tokens, which then show up at the receiver
+	// as unauthenticated duplicate pushes.
+	if _, err := sa.GetEventRouter().SubmitOperationalEvent(state.Id.Hex(), &set, ""); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -787,6 +1054,103 @@ func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.Respons
 	resp, _ := json.MarshalIndent(prMeta, "", "  ")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// WellKnownOAuthAuthorizationServer serves RFC 8414 OAuth 2.0 Authorization
+// Server Metadata.
+//
+// goSignals is a resource server that delegates the OAuth authorization/token
+// grant to an external authorization server (ADR 0001). When such a server is
+// configured (GetOAuthServers, e.g. Keycloak) this endpoint REFLECTS that
+// server's metadata verbatim — a discovery proxy so a client learns the real
+// AS's issuer, authorization and token endpoints rather than a synthesized view.
+// When no external authorization server is configured it advertises goSignals'
+// own partial AS surface (introspection/revocation/registration + jwks), which is
+// all goSignals implements directly.
+//
+// The optional {issuer} path segment is resolved the same local-rooted-then-bare
+// way SSF §7.2.1 discovery and JWKS serving resolve it (GH #209): a path-bearing
+// variant must address a registered issuer or 404 — it never synthesizes metadata
+// for an unknown issuer. The bare endpoint describes the default issuer.
+func (sa *SignalsApplication) WellKnownOAuthAuthorizationServer(w http.ResponseWriter, r *http.Request) {
+	WellKnownOAuthAuthorizationServerHandler(sa, w, r)
+}
+
+func WellKnownOAuthAuthorizationServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	issuerPath, _ := url.QueryUnescape(vars["issuer"])
+	serverLog.Debug(fmt.Sprintf("GET WellKnownOAuthAuthorizationServer/%s", issuerPath))
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	baseUrl := sa.GetBaseUrl()
+	resolvedIss := sa.GetDefIssuer()
+	jwksUri, _ := baseUrl.Parse("/jwks.json")
+	if issuerPath != "" {
+		name, exists := resolveIssuerKeyName(sa, issuerPath)
+		if !exists {
+			serverLog.Debug(fmt.Sprintf("Unknown issuer for oauth-authorization-server: %s", issuerPath))
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		resolvedIss = name
+		jwksUri, _ = baseUrl.Parse("/jwks/" + issuerPath)
+	}
+
+	// Proxy: when an external authorization server is configured, reflect ITS
+	// metadata verbatim so the client talks to the real AS (e.g. Keycloak). If the
+	// configured server is unreachable, surface a 502 rather than fall back to the
+	// self-document — claiming to be the AS when we are not would be misleading.
+	if servers := sa.GetAuth().GetOAuthServers(); len(servers) > 0 {
+		raw, err := fetchUpstreamAuthorizationServerMetadata(r.Context(), servers[0])
+		if err != nil {
+			serverLog.Warn("oauth-authorization-server proxy fetch failed", "as", servers[0], "error", err.Error())
+			http.Error(w, fmt.Sprintf("configured authorization server %s metadata unavailable: %v", servers[0], err), http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+		return
+	}
+
+	// No external AS: advertise goSignals' own partial authorization-server surface.
+	resp, _ := json.Marshal(buildAuthorizationServerMetadata(sa, resolvedIss, jwksUri.String()))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
+// buildAuthorizationServerMetadata assembles the partial RFC 8414 metadata that
+// describes goSignals itself when no external authorization server is configured.
+// It advertises only the token-management endpoints goSignals truly implements
+// (introspection/revocation/registration) plus its JWKS and supported scopes,
+// never an authorization_endpoint or token_endpoint.
+func buildAuthorizationServerMetadata(sa SsfApplicationInterface, issuer, jwksUri string) model.AuthorizationServerMetadata {
+	baseUrl := sa.GetBaseUrl()
+	introspect, _ := baseUrl.Parse("/introspect")
+	revoke, _ := baseUrl.Parse("/revoke")
+	register, _ := baseUrl.Parse("/register")
+	return model.AuthorizationServerMetadata{
+		Issuer:                issuer,
+		JwksUri:               jwksUri,
+		IntrospectionEndpoint: introspect.String(),
+		RevocationEndpoint:    revoke.String(),
+		RegistrationEndpoint:  register.String(),
+		ScopesSupported: []string{
+			authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt,
+			authSupport.ScopeStreamAdmin, authSupport.ScopeRegister, authSupport.ScopeKey,
+		},
+	}
+}
+
+// fetchUpstreamAuthorizationServerMetadata retrieves the configured external
+// authorization server's RFC 8414 metadata verbatim (raw JSON), trying the
+// oauth-authorization-server document first and falling back to the OpenID
+// Provider openid-configuration (Keycloak serves both). The bytes are returned
+// unmodified so the proxy reflects the real AS without lossy re-marshaling.
+func fetchUpstreamAuthorizationServerMetadata(ctx context.Context, asBaseUrl string) (json.RawMessage, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
+	return wellKnownSupport.FetchOAuthAuthorizationServerRaw(ctx, client, asBaseUrl)
 }
 
 // cliClientId resolves the recommended public OAuth client_id advertised to
@@ -844,7 +1208,19 @@ func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	result := make([]model.StreamStateRecord, 0)
 	for _, stream := range mapStreams {
 		if projectId == "" || stream.ProjectId == projectId {
-			result = append(result, adjustStateBaseUrl(sa, stream))
+			// Mask every credential before it leaves the server (ADR 0022 §3): this
+			// state-listing surface must never surface a live bearer. MaskCredentials
+			// works on a deep copy, so the in-memory record is untouched.
+			adjusted := adjustStateBaseUrl(sa, stream)
+			masked := adjusted.MaskCredentials()
+			// Overlay this node's JWKS readiness (ADR 0033). GetStateMap sources
+			// records from the DAO, which never carries readiness — an unresolvable
+			// stream still reports status "enabled", so without this the operator
+			// has nothing to look at.
+			sa.GetStreamService().OverlayJwksReadiness(masked)
+			// Report the effective ingest durability (issue #343).
+			sa.GetStreamService().OverlayEffectiveDurability(masked)
+			result = append(result, *masked)
 		}
 	}
 
@@ -899,7 +1275,16 @@ func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	serverLog.Debug("GetStreamState:", "returned", config.StreamConfiguration.Id)
 
-	resp, err := json.Marshal(config)
+	// Mask every credential (ADR 0022 §3): this state read surface must never
+	// surface a live bearer. MaskCredentials returns a deep copy, leaving the
+	// stored record untouched.
+	masked := config.MaskCredentials()
+	// Overlay this node's JWKS readiness (ADR 0033) — GetStreamState reads from
+	// the DAO and never consults the receiver cache.
+	sa.GetStreamService().OverlayJwksReadiness(masked)
+	// Report the effective ingest durability (issue #343).
+	sa.GetStreamService().OverlayEffectiveDurability(masked)
+	resp, err := json.Marshal(masked)
 	if err != nil {
 		serverLog.Error("Internal error GetStreamState:", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1011,7 +1396,7 @@ func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 
 	server, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1063,7 +1448,7 @@ func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// Find the existing server
 	existing, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1133,7 +1518,7 @@ func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	existing, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1270,7 +1655,7 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 // project (unknown JTI) is treated as out-of-scope for a confined caller, which
 // the callers turn into a no-op (revoke) or active:false (introspect) without
 // leaking existence.
-func callerMayActOnProject(authCtx *authUtil.AuthContext, targetProjectID string) bool {
+func callerMayActOnProject(authCtx *authSupport.AuthContext, targetProjectID string) bool {
 	unrestricted, projectID := services.ProjectScope(authCtx)
 	if unrestricted {
 		return true
@@ -1304,7 +1689,7 @@ func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.R
 	jti := token
 	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
 		jti = claims.ID
-	} else if peeked := authUtil.PeekJti(token); peeked != "" {
+	} else if peeked := authSupport.PeekJti(token); peeked != "" {
 		jti = peeked
 	}
 
@@ -1362,7 +1747,7 @@ func (sa *SignalsApplication) RevokeHandler(w http.ResponseWriter, r *http.Reque
 	jti := ""
 	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
 		jti = claims.ID
-	} else if peeked := authUtil.PeekJti(token); peeked != "" {
+	} else if peeked := authSupport.PeekJti(token); peeked != "" {
 		jti = peeked
 	}
 
@@ -1377,7 +1762,7 @@ func (sa *SignalsApplication) RevokeHandler(w http.ResponseWriter, r *http.Reque
 // revokeIfPermitted applies the project guard then revokes by JTI. A
 // cross-project (or unknown) target is a silent no-op so /revoke never leaks
 // existence. Revocation failures are logged but never change the HTTP outcome.
-func (sa *SignalsApplication) revokeIfPermitted(r *http.Request, authCtx *authUtil.AuthContext, jti string) {
+func (sa *SignalsApplication) revokeIfPermitted(r *http.Request, authCtx *authSupport.AuthContext, jti string) {
 	record, err := sa.GetTokenService().FindByJTI(r.Context(), jti)
 	if err != nil {
 		serverLog.Warn("Revoke lookup error", "jti", jti, "error", err)
@@ -1546,8 +1931,16 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		rawKeyName = vars["issuer"]
 	}
 	keyName, _ := url.QueryUnescape(rawKeyName)
-	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), keyName)
-	if jsonKey == nil {
+
+	// ADR 0023 (local-issuer addressing): a local issuer is addressed by its path
+	// component and stored under the reconstructed full URL (baseURL + "/" +
+	// <captured path>); a legacy/foreign keyName references the original
+	// publishing entity verbatim. resolveIssuerKeyName performs that
+	// local-rooted-then-bare lookup — the same resolution §7.2.1 discovery uses,
+	// so JWKS and discovery accept an identical set of issuer segments (GH #209).
+	lookupName, exists := resolveIssuerKeyName(sa, keyName)
+	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), lookupName)
+	if !exists || jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -1589,8 +1982,55 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	return
 }
 
+// requestKeyAlg is a key request's ?alg=, or the key service's default key type
+// (I2SIG_KEY_ALG) when it is absent or blank (spec #114).
+func requestKeyAlg(sa SsfApplicationInterface, r *http.Request) string {
+	if alg := strings.TrimSpace(r.URL.Query().Get("alg")); alg != "" {
+		return alg
+	}
+	if ks := sa.GetKeyService(); ks != nil {
+		return ks.DefaultKeyAlg()
+	}
+	return services.FallbackKeyAlg
+}
+
+// isRSAKeyAlg reports whether a key request's alg ("" defaults to RS256) is RSA.
+func isRSAKeyAlg(alg string) bool {
+	return alg == "" || alg == "RS256"
+}
+
+// keyAlgLabel names a key request's alg for a message, "" reading as RS256.
+func keyAlgLabel(alg string) string {
+	if alg == "" {
+		return "RS256"
+	}
+	return alg
+}
+
 func checkKeyNameExists(sa SsfApplicationInterface, keyName string) bool {
 	// Check for existing key
 	keyNames, _ := sa.GetKeyService().ListKeyNames(context.Background())
 	return slices.Contains(keyNames, keyName)
+}
+
+// resolveIssuerKeyName resolves a discovery/JWKS path segment to the registered
+// signing-key name it addresses, using ADR 0023 local-rooted-then-bare lookup:
+// it prefers the base-rooted local issuer (baseURL + "/" + segment) when a key
+// is registered under that name, otherwise the bare segment (a foreign/legacy
+// issuer referenced verbatim — folding it into the local scheme would break the
+// SSF §7.2.4 binding for relayed SETs). It returns the resolved key name and
+// whether a key is actually registered under it; when neither resolves it
+// returns the bare segment with false so callers 404. JWKS serving and §7.2.1
+// discovery share this so they accept the exact same set of issuer segments.
+func resolveIssuerKeyName(sa SsfApplicationInterface, segment string) (string, bool) {
+	if baseUrl := sa.GetBaseUrl(); baseUrl != nil {
+		localIss := strings.TrimRight(baseUrl.String(), "/") + "/" + segment
+		if checkKeyNameExists(sa, localIss) {
+			return localIss, true
+		}
+	}
+	if checkKeyNameExists(sa, segment) {
+		return segment, true
+	}
+	return segment, false
 }

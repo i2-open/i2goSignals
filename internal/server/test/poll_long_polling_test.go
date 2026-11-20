@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -41,7 +42,7 @@ func (suite *LongPollSuite) SetupSuite() {
 		},
 	}
 
-	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, _ := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	state, _ := instance.GetStreamState(stream.Id)
 	instance.app.EventRouter.UpdateStreamState(state)
 
@@ -444,16 +445,28 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 	t := suite.T()
 
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	numPollers := 3
+	// finished[i] is written only by poller i and read only after wg.Wait.
+	finished := make([]time.Time, numPollers)
 
 	for i := 0; i < numPollers; i++ {
 		wg.Add(1)
+		ready.Add(1)
 		go func(index int) {
 			defer wg.Done()
+			// Ready means the request is on the wire, not merely about to be
+			// sent; the Once also releases main if Do fails before writing.
+			var readyOnce sync.Once
+			signalReady := func() { readyOnce.Do(ready.Done) }
+			defer signalReady()
 
+			// An explicit TimeoutSecs keeps the package's 1 s default
+			// (main_test.go) from releasing the polls before the event fires.
 			pollParams := model.PollParameters{
 				ReturnImmediately: false,
 				MaxEvents:         5,
+				TimeoutSecs:       5,
 			}
 
 			bodyBytes, _ := json.Marshal(pollParams)
@@ -462,9 +475,16 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 			req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 			req.Header.Set("Content-Type", "application/json")
 
+			req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+				WroteRequest: func(httptrace.WroteRequestInfo) { signalReady() },
+			}))
+
+			// start precedes the ready signal, so every poller's clock begins
+			// before the main goroutine's pre-event sleep.
 			start := time.Now()
 			resp, err := suite.instance.client.Do(req)
-			elapsed := time.Since(start)
+			finished[index] = time.Now()
+			elapsed := finished[index].Sub(start)
 
 			assert.NoError(t, err, fmt.Sprintf("Poller %d failed", index))
 			if resp != nil {
@@ -474,8 +494,10 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 		}(i)
 	}
 
-	// Wait a bit, then generate an event
+	// Wait until every poll request has been sent, wait a bit, then generate an event
+	ready.Wait()
 	time.Sleep(500 * time.Millisecond)
+	firedAt := time.Now()
 
 	subject := &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/concurrent-test"),
@@ -488,4 +510,11 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 
 	// Wait for all pollers to complete
 	wg.Wait()
+
+	// Each request was sent before the sleep, so a poll that held open
+	// completes after the event fired. One that returned at once completes
+	// before it, whatever its elapsed time.
+	for i, done := range finished {
+		assert.False(t, done.Before(firedAt), fmt.Sprintf("Poller %d returned before the event fired", i))
+	}
 }

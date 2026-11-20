@@ -10,9 +10,9 @@ This document summarizes the OIDC/OAuth authentication integration implemented f
 ### 1. Backend (goSignalsServer)
 
 #### OIDC Discovery Endpoint
-- **File**: `pkg/goSignals/server/api_stream_management.go`
+- **File**: `internal/server/api_stream_management.go`
 - **Endpoint**: `GET /.well-known/openid-configuration`
-- **Route**: Added to `pkg/goSignals/server/routers.go`
+- **Route**: Added to `internal/server/routers.go`
 - **Purpose**: Provides OIDC provider metadata for adminUI to discover Keycloak endpoints
 
 #### Token Validation
@@ -160,7 +160,7 @@ This document summarizes the OIDC/OAuth authentication integration implemented f
 ## Files Created/Modified
 
 ### Created
-1. `pkg/goSignals/server/api_stream_management.go` - Added OidcConfiguration handler
+1. `internal/server/api_stream_management.go` - Added OidcConfiguration handler
 2. `internal/authUtil/auth_token.go` - Added OIDC token validation
 3. `config/keycloak/realm/gosignals-realm.json` - Keycloak realm configuration
 4. `adminUI/src/lib/auth/authConfig.ts` - OIDC client configuration
@@ -173,7 +173,7 @@ This document summarizes the OIDC/OAuth authentication integration implemented f
 11. `OIDC_IMPLEMENTATION.md` - This summary document
 
 ### Modified
-1. `pkg/goSignals/server/routers.go` - Added OIDC discovery route
+1. `internal/server/routers.go` - Added OIDC discovery route
 2. `adminUI/package.json` - Added oidc-client-ts and axios dependencies
 3. `adminUI/src/App.tsx` - Added UserMenu to header
 4. `adminUI/src/main.tsx` - Added AuthProvider wrapper and routing

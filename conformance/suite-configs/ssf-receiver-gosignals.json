@@ -1,0 +1,22 @@
+{
+    "alias": "gosignals-ssf-rx",
+    "description": "SSF Receiver conformance: suite emulates a Transmitter; goSignals registers a stream against it",
+    "ssf": {
+        "stream": {
+            "audience": "{BASEURL}test/a/gosignals-ssf-rx"
+        },
+        "subjects": {
+            "valid": {
+                "format": "opaque",
+                "id": "valid"
+            },
+            "invalid": {
+                "format": "opaque",
+                "id": "invalid"
+            }
+        },
+        "transmitter": {
+            "access_token": "ssf-conformance-rx-token"
+        }
+    }
+}

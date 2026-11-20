@@ -6,12 +6,11 @@ package goSetPush
 
 import (
 	"fmt"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 // RFC8935 error codes per Section 2.4.
@@ -26,6 +25,12 @@ const (
 	ErrJwsSignatureFailed   = "jws_signature_failed"
 	ErrJweDecryptionFailed  = "jwe_decryption_failed"
 )
+
+// ErrTemporarilyUnavailable is the error code a receiver sends with a 503 when
+// it could not durably store a SET that was itself valid. It is not in the
+// RFC8935 §2.4 registry: the 503 status and its Retry-After header are the
+// signal a transmitter acts on, and the code only names the condition.
+const ErrTemporarilyUnavailable = "temporarily_unavailable"
 
 // DeliveryErr represents an RFC8935 SET delivery error response.
 // It is returned as JSON in the body of 400 Bad Request responses.
@@ -43,18 +48,41 @@ func (e *DeliveryErr) Error() string {
 type ReceivedSET struct {
 	Token       *goSet.SecurityEventToken
 	TokenString string
+
+	// Validation reports the event-payload dispositions computed by
+	// ReceiverConfig.Validators, so the caller that owns event_validation mode
+	// policy can act on them and count them. It is the ZERO SetResult
+	// (Disposition == goSetValidate.Valid, no Results) when no validator set was
+	// configured — this package never rejects on a disposition and never maps one
+	// to an RFC8935 error.
+	Validation goSetValidate.SetResult
 }
 
 // ReceiverConfig configures the push receiver protocol handler.
 type ReceiverConfig struct {
 	// JWKS used to validate incoming SET signatures. If nil, tokens are parsed without signature verification.
-	JWKS *keyfunc.JWKS
+	JWKS *goSet.JWKS
 
 	// ExpectedIssuer is the expected "iss" claim value. If empty, issuer validation is skipped.
 	ExpectedIssuer string
 
 	// ExpectedAudiences is the list of acceptable "aud" values. If empty, audience validation is skipped.
 	ExpectedAudiences []string
+
+	// RequireSignature makes JWS signature verification mandatory (#184 signing-only
+	// posture): the SET is rejected with jws_signature_failed if no JWKS is available
+	// to verify against or if verification fails. When false (default) behavior is
+	// unchanged — a nil JWKS skips verification and a verify failure is invalid_request.
+	RequireSignature bool
+
+	// Validators optionally engages event-payload validation for this receiver
+	// stream (spec #247). When nil — the default — no validation runs and
+	// ReceivedSET.Validation is left zero, so behavior is exactly as it was
+	// before the field existed. When set, dispositions are computed and reported
+	// on ReceivedSET.Validation; this package NEVER rejects a SET because of one.
+	// event_validation mode policy (NONE/WARN/ENFORCE/STRICT), the wire mapping,
+	// and the metrics belong to the caller.
+	Validators *goSetValidate.ValidatorSet
 
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger
@@ -71,6 +99,21 @@ type TransmitterConfig struct {
 
 	// HTTPClient is an optional custom HTTP client. If nil, a default with 60s timeout is used.
 	HTTPClient *http.Client
+
+	// InsecureSkipVerify, when true and HTTPClient is nil, builds the default
+	// client with TLS certificate verification disabled. It carries the stream's
+	// tx_tls_skip_verify flag for receivers that present a self-signed or
+	// otherwise unverifiable TLS cert. Ignored when HTTPClient is supplied.
+	InsecureSkipVerify bool
+
+	// AllowPlaintext permits EndpointURL to use a scheme other than https.
+	// False (the default) is the business-stream TLS floor (ADR-0066 §2 as
+	// amended by ADR 0076): PushSET refuses a plaintext endpoint before any
+	// request is built, whether or not HTTPClient is injected. It carries the
+	// stream's tx_allow_plaintext opt-out and is orthogonal to
+	// InsecureSkipVerify, which only governs certificate verification on an
+	// https dial. Control streams never set it (ADR-0063 §1).
+	AllowPlaintext bool
 
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger

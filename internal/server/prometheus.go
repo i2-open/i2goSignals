@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/dao/daometrics"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -17,6 +19,7 @@ var pLog = logger.Sub("PROMTH")
 type PrometheusHandler struct {
 	App                    *SignalsApplication
 	EventsIn, EventsOut    *prometheus.CounterVec
+	EventAge               *prometheus.HistogramVec
 	PubPushCnt, PubPollCnt prometheus.GaugeFunc
 	RcvPushCnt, RcvPollCnt prometheus.GaugeFunc
 	ClusterLeasesHeld      prometheus.Gauge
@@ -30,15 +33,22 @@ type PrometheusHandler struct {
 	PushStateTransitions   *prometheus.CounterVec
 	PushRecoveryDuration   *prometheus.HistogramVec
 	PushIdleVerifyOutcomes *prometheus.CounterVec
+
+	// Inbound event-validation instrumentation (spec #247 #251). Labels are
+	// disposition × mode × transport, all closed enums — deliberately NOT
+	// stream_id or event_uri, either of which would make the series unbounded on
+	// a busy STRICT receiver.
+	EventValidations *prometheus.CounterVec
 }
 
 type streamCollector struct {
-	sa           *SignalsApplication
-	statusDesc   *prometheus.Desc
-	errorDesc    *prometheus.Desc
-	createdDesc  *prometheus.Desc
-	startDesc    *prometheus.Desc
-	modifiedDesc *prometheus.Desc
+	sa                *SignalsApplication
+	statusDesc        *prometheus.Desc
+	errorDesc         *prometheus.Desc
+	jwksReadinessDesc *prometheus.Desc
+	createdDesc       *prometheus.Desc
+	startDesc         *prometheus.Desc
+	modifiedDesc      *prometheus.Desc
 }
 
 func newStreamCollector(sa *SignalsApplication) *streamCollector {
@@ -54,6 +64,18 @@ func newStreamCollector(sa *SignalsApplication) *streamCollector {
 			"goSignals_router_stream_error_info",
 			"Information about the stream error message.",
 			[]string{"stream_id", "error_msg"},
+			nil,
+		),
+		// Node-local readiness of a receive direction's SET-verification material
+		// (ADR 0033). It sits beside the error gauge because stream status
+		// deliberately keeps reporting "enabled" for a stream whose issuer JWKS
+		// cannot be resolved — this is the only scrapeable signal for that state.
+		// The readiness value rides as a label, matching the info-gauge idiom the
+		// status and error gauges already use.
+		jwksReadinessDesc: prometheus.NewDesc(
+			"goSignals_router_stream_jwks_readiness_info",
+			"Readiness of a receive direction's SET-verification material on this node: ready, unresolved, or not-configured.",
+			[]string{"stream_id", "direction", "readiness"},
 			nil,
 		),
 		createdDesc: prometheus.NewDesc(
@@ -80,6 +102,7 @@ func newStreamCollector(sa *SignalsApplication) *streamCollector {
 func (c *streamCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.statusDesc
 	ch <- c.errorDesc
+	ch <- c.jwksReadinessDesc
 	ch <- c.createdDesc
 	ch <- c.startDesc
 	ch <- c.modifiedDesc
@@ -94,6 +117,20 @@ func (c *streamCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.createdDesc, prometheus.GaugeValue, float64(state.CreatedAt.Unix()), streamID)
 		ch <- prometheus.MustNewConstMetric(c.startDesc, prometheus.GaugeValue, float64(state.StartDate.Unix()), streamID)
 		ch <- prometheus.MustNewConstMetric(c.modifiedDesc, prometheus.GaugeValue, float64(state.ModifiedAt.Unix()), streamID)
+
+		// GetStateMap sources records from the DAO, which never carries the
+		// derived, node-local readiness — overlay it before reporting (ADR 0033).
+		// Transmit-only streams have no receive direction and emit no series.
+		rec := state
+		c.sa.StreamService.OverlayJwksReadiness(&rec)
+		if rec.JwksReadiness != nil {
+			ch <- prometheus.MustNewConstMetric(c.jwksReadinessDesc, prometheus.GaugeValue, 1,
+				streamID, "receive", rec.JwksReadiness.State)
+		}
+		if rec.InboundJwksReadiness != nil {
+			ch <- prometheus.MustNewConstMetric(c.jwksReadinessDesc, prometheus.GaugeValue, 1,
+				streamID, "inbound", rec.InboundJwksReadiness.State)
+		}
 	}
 }
 
@@ -223,6 +260,18 @@ func (h *PrometheusHandler) RecordIdleVerifyOutcome(sid, outcome string) {
 	}
 }
 
+// RecordEventValidation counts one inbound SET's whole-SET event-validation
+// disposition. disposition is a goSetValidate.Disposition.String() ("valid",
+// "unsupported", "malformed"), mode is the resolved event_validation mode, and
+// transport is "push" or "poll". It is only called when validation actually ran —
+// a NONE stream builds no validator set and reports nothing, so the counter never
+// carries a meaningless mode="NONE" series.
+func (h *PrometheusHandler) RecordEventValidation(disposition, mode, transport string) {
+	if h != nil && h.EventValidations != nil {
+		h.EventValidations.WithLabelValues(disposition, mode, transport).Inc()
+	}
+}
+
 func (sa *SignalsApplication) InitializePrometheus() {
 	sa.InitializePrometheusWithRegisterer(prometheus.DefaultRegisterer)
 }
@@ -247,6 +296,18 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 				Help:      "Events delivered",
 			},
 			[]string{"type", "iss", "tfr", "stream_id"},
+		),
+		// Receipt time minus the SET's toe, for inbound SETs that carry one
+		// (#325). Clock-skew-sensitive across hosts; no stream_id label.
+		EventAge: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "event_age_at_receipt_seconds",
+				Help:      "Inbound SET age at receipt (receipt time minus toe), by receive transport",
+				Buckets:   prometheus.ExponentialBucketsRange(0.001, 30, 31),
+			},
+			[]string{"tfr"},
 		),
 		PubPollCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -358,12 +419,27 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 			},
 			[]string{"stream_id", "outcome"},
 		),
+		EventValidations: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "event_validation_total",
+				Help:      "Inbound SET event-validation dispositions, labeled by whole-SET disposition, resolved event_validation mode, and receive transport.",
+			},
+			[]string{"disposition", "mode", "transport"},
+		),
 	}
 
 	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut)
 
 	registerTo(reg, prometheusHandler.EventsIn)
 	registerTo(reg, prometheusHandler.EventsOut)
+	if r, ok := sa.EventRouter.(interface {
+		SetEventAgeHistogram(*prometheus.HistogramVec)
+	}); ok {
+		r.SetEventAgeHistogram(prometheusHandler.EventAge)
+		registerTo(reg, prometheusHandler.EventAge)
+	}
 
 	registerTo(reg, prometheusHandler.RcvPollCnt)
 	registerTo(reg, prometheusHandler.RcvPushCnt)
@@ -375,7 +451,39 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	registerTo(reg, prometheusHandler.PushFailures)
 	registerTo(reg, prometheusHandler.PushStateTransitions)
 	registerTo(reg, prometheusHandler.PushRecoveryDuration)
+	// EventDAO latency + batch-size histograms (community #328); the providers
+	// wrap their live EventDAO with daometrics.Default.
+	for _, c := range daometrics.Default.Collectors() {
+		registerTo(reg, c)
+	}
+	// Delivery in-flight gauge + coalesced ack batch-size histogram (#336),
+	// queue and acknowledgement time histograms (#352).
+	for _, c := range eventRouter.DeliveryCollectors() {
+		registerTo(reg, c)
+	}
+	// Per-stream backlog depth and oldest age, read from the owning router's
+	// delivery queues at scrape (#352).
+	if r, ok := sa.EventRouter.(interface {
+		BacklogCollector() prometheus.Collector
+	}); ok {
+		registerTo(reg, r.BacklogCollector())
+	}
+	// Peer claims answered and claim budget exhaustion (#365).
+	for _, c := range eventRouter.ClaimCollectors() {
+		registerTo(reg, c)
+	}
+	// Store/coordinator reads made under the router lock on fan-out (#362).
+	for _, c := range eventRouter.RoutingCollectors() {
+		registerTo(reg, c)
+	}
+	// Local WAL depth, drain lag, drained/replayed counts, drain duration (#341).
+	for _, c := range eventRouter.WALCollectors() {
+		registerTo(reg, c)
+	}
+	// Poll-receiver outstanding polls (#338).
+	registerTo(reg, pollOutstandingGauge)
 	registerTo(reg, prometheusHandler.PushIdleVerifyOutcomes)
+	registerTo(reg, prometheusHandler.EventValidations)
 	registerTo(reg, newStreamCollector(sa))
 	registerTo(reg, newClusterCollector(sa))
 
@@ -387,6 +495,9 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 
 	sa.Stats = &prometheusHandler
 	sa.EventRouter.SetStatsHandler(sa.Stats)
+	if sa.SstpDialer != nil {
+		sa.SstpDialer.SetStats(sa.Stats)
+	}
 }
 
 func registerTo(reg prometheus.Registerer, collector prometheus.Collector) {

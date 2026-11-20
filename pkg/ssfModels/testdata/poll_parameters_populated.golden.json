@@ -1,0 +1,1 @@
+{"maxEvents":25,"returnImmediately":true,"ack":["jti-1","jti-2"],"setErrs":{"jti-3":{"err":"invalid_key","description":"unknown kid"}},"timeoutSecs":30}

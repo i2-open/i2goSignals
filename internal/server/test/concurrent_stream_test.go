@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -47,7 +47,7 @@ func TestConcurrentStreamUpdates(t *testing.T) {
 		},
 	}
 
-	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, _ := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 
 	// Concurrently update the stream from multiple goroutines
 	var wg sync.WaitGroup
@@ -103,7 +103,7 @@ func TestConcurrentEventHandling(t *testing.T) {
 		},
 	}
 
-	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, _ := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	state, _ := instance.GetStreamState(stream.Id)
 	instance.app.EventRouter.UpdateStreamState(state)
 

@@ -97,15 +97,68 @@ understands. They are documented in their natural section below.
 | `BASE_URL`                     | Public host:port the server presents (e.g. `127.0.0.1:8888`).                                                            | `127.0.0.1:<PORT>` or `127.0.0.1:8888` |
 | `LOG_LEVEL`                    | Logging level: `debug`, `info`, `warn`, `error`.                                                                         | `info`                             |
 | `LOG_FORMAT`                   | `text` for human-readable key=value, `json` for one-object-per-line consumption by Alloy / Fluent Bit / CloudWatch agent. See [`observability.md`](observability.md). | `text` |
+| `I2SIG_SHUTDOWN_DRAIN`         | Per-phase graceful-drain delay, in seconds (float), applied during `Shutdown()` — once after closing receiver/poll connections and once after stopping the event router, so total drain is roughly `2 ×` this value. `0` disables the drain (used by the test suite, which tears down dozens of servers). Unparseable/negative falls back to the default. | `1` |
+| `I2SIG_STRICT_SSF`             | **`goSsfServer` only.** Run the standalone SSF-server simulator as a strict-spec, administrator-provisioned transmitter (truthy = `true`/`1`/`enabled`/`yes`, case-insensitive; ADR 0025). On startup `I2SIG_ISSUER_DEFAULT` MUST be an explicit absolute `http(s)` issuer URL — the base-URL / `DEFAULT` fallback is refused and the server exits — and that issuer's SET-signing key is provisioned up front (restart-safe), so issuer-specific discovery (`/.well-known/ssf-configuration/<path>`, RFC 8615), `/jwks/<path>`, and SET signing all bind to the declared issuer (`iss` == discovery issuer == JWKS key name, ADR 0023). Does **not** change the `/stream` registration contract, and `cmd/goSignalsServer` ignores it. | `false` |
 
 ## Stream
 
 | Variable                                  | Description                                                                                | Default |
 |-------------------------------------------|--------------------------------------------------------------------------------------------|---------|
-| `I2SIG_STREAM_MIN_VERIFICATION_INTERVAL`  | Minimum interval, in seconds, between verification requests a receiver may demand.         | `300`   |
-| `I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT`     | Maximum inactivity timeout, in seconds, before a stream connection is considered idle.     | `3600`  |
+| `I2SIG_STREAM_MIN_VERIFICATION_INTERVAL`  | Minimum interval, in seconds, between verification requests a receiver may demand. Non-positive / absent / unparseable falls back to the default; `0` is not a supported value (the stream-config layer treats `0` as "unset"). | `300`   |
+| `I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT`     | Maximum inactivity timeout, in seconds, before a stream connection is considered idle. Non-positive / absent / unparseable falls back to the default; `0` is not a supported value (the stream-config layer treats `0` as "unset"). | `3600`  |
+| `I2SIG_STREAM_EVENT_VALIDATION`           | Server-wide default event-validation policy applied to events **received** on a stream. Accepted values (case-insensitive): `NONE` (no validation), `WARN` (validate and report dispositions, deliver regardless), `ENFORCE` (reject events that fail validation), `STRICT` (`ENFORCE` plus reject events that cannot be validated). Unset, empty, or unrecognized falls back to `NONE` with a `WARN`. Per-receiver overrides are set via `event_validation` on the stream's `StreamStateRecord` (management API; off the SSF wire-format `StreamConfiguration`), where an empty value inherits this default. The knob is receive-side only — a mode set on a transmit-only stream is ignored with a `WARN`; on a bidirectional SSTP pair record the single field governs the **inbound** leg. | `NONE` |
 | `I2SIG_SUBJECT_FILTERING`                 | Enables SSF subject filtering (Add/Remove Subject, §8.1.3) server-wide. `ENABLED` advertises the `add_subject_endpoint` / `remove_subject_endpoint` in SSF discovery and makes the per-stream `defaultSubjects` knob settable; `DISABLED` omits both endpoints, returns `404` from the Add/Remove Subject handlers, and silently ignores `defaultSubjects`. | `DISABLED` |
 | `I2SIG_SUBJECT_REMOVAL_GRACE`             | Server-wide default for the SSF §9.3 ("Malicious Subject Removal") removal grace period, in **seconds**. `0` (or unset) means immediate enforcement — no behavior change. Per-transmitter-stream overrides can be set via `subject_removal_grace_seconds` on the stream's `StreamStateRecord` (set via the management API; an override on a receiver stream is ignored with a `WARN`). Negative or non-integer values fall back to `0`. On `LOCAL` and `HYBRID` streams a delivery-stopping change is deferred for the grace window before it takes effect; on `HYBRID` the upstream `remove` relay is also deferred to the same deadline and fired by the push-transmitter lease owner's backfill sweep, so the upstream keeps feeding events during the window. `PASSTHRU` adds no grace of its own — the upstream transmitter's §9.3 handling is authoritative. | `0` |
+| *(retired)* `I2SIG_INSECURE_SSTP_HTTP`     | No longer read. Plaintext business endpoints are governed per stream by `tx_allow_plaintext` (see **Per-stream transport flags** below), never by an environment variable (ADR-0066 §2 as amended by ADR 0076). | — |
+
+### Per-stream transport flags (`tx_*`)
+
+Two goSignals-extension fields on the stream configuration govern how this server dials a business stream's
+peer. Both default to `false`, are omitted from JSON when false, and are set per stream through the
+management API — neither has an environment default except where noted.
+
+| Field | Description | Default |
+| :---- | :---------- | :------ |
+| `tx_tls_skip_verify` | When `true`, the push transmitter skips TLS certificate verification for the receiver (self-signed / SAN-less receivers in dev or conformance). Only relaxes certificate checks on an `https` dial; it does not permit plaintext. Deployment-wide default via `I2SIG_TX_TLS_SKIP_VERIFY`. | `false` |
+| `tx_allow_plaintext` | The **business-stream TLS floor** opt-out. When `false`, every endpoint this server **dials** for the stream — a push transmitter's receiver `endpoint_url`, a poll receiver's transmitter `endpoint_url`, and an SSTP **initiator**'s `endpoint_url` — must be `https`: a create or update naming an `http://` endpoint is refused with `400`, and the dialers (`goSetPush`, `goSetPoll`, `goSetSstp`) refuse again at dial time with `ErrPlaintextNotAllowed` (a transport failure), so no request is made. Endpoints this server *serves* (push receive, poll transmit, an SSTP responder) are never subject to it. Set to `true` for local/dev peers on plain HTTP. On update the flag follows the request only when the request carries `delivery` (a transport change); a partial update that omits `delivery` leaves it as stored. There is deliberately no environment default; on an SSTP pair it is supplied on the bootstrap and carried to the peer mirror. | `false` |
+
+## Event
+
+| Variable                  | Description                                                                                | Default |
+|---------------------------|--------------------------------------------------------------------------------------------|---------|
+| `I2SIG_EVENT_TYPES_EXTRA` | Extends the supported-event catalog with event type URIs this build has no compiled-in knowledge of, so a private or not-yet-published vocabulary can be negotiated and routed without recompiling. Entries are separated by commas and/or whitespace and must each be an **absolute URI**; a relative or unparseable entry is skipped with a `WARN` naming it, empty entries (a trailing comma, repeated separators) are discarded silently, and an entry that duplicates a built-in (or another entry) is ignored case-insensitively. Extended URIs behave exactly like built-in ones: they are advertised in `events_supported`, an `events_requested` naming them — literally, by pattern, or via `"*"` — resolves them into `events_delivered`, and the router then fans out SETs carrying them over push, poll, and SSTP alike. | (none) |
+| `I2SIG_PING_RETENTION` | How long a delivered **ping event** (an SSF Verification Event, sent or received) is kept after this server stored it, as a Go duration (`24h`, `90m`). One node per cluster runs the purge every 6 hours; a ping still pending on any stream is never purged, and data events are not affected. `0` (or any zero duration) turns the purge off. An unparseable or negative value logs a `WARN` and uses the default. Read once at startup; the startup cleanup-settings line states what is in force. The first run after an upgrade drains the stored backlog oldest-first, one hour of stored time per window, over as many runs as it takes; pings stored before the upgrade are dated by their insertion time. The purge never runs MongoDB `compact`; returning the freed space is an operator action. See [`operations.md`](operations.md#ping-events-are-purged-after-24-hours) and ADR 0048. | `24h` |
+| `I2SIG_INGEST_RETRY_AFTER` | `Retry-After` value, in whole seconds, sent with the `503 Service Unavailable` that an RFC 8935 push receiver endpoint or an SSTP acceptor (`POST /sstp/{id}`) returns when a received SET cannot be durably stored (issue #333, ADR 0038). The SET is not acknowledged, so the peer keeps it and resends after this delay. Read on each such response. A non-integer or non-positive value falls back to the default with a `WARN`. See the ingest status table in [`operations.md`](operations.md#ingest-status-codes-push-receiver-and-sstp-acceptor). | `2` |
+
+**Why this exists.** `events_delivered` is negotiated at registration as
+`events_requested ∩ events_supported`, and the router matches a SET's event
+types against `events_delivered`. A URI outside the catalog therefore intersects
+to nothing: the stream registers with `201`, SETs carrying that type are
+accepted, verified, stored and counted — and are **never routed anywhere**. That
+silent drop is the failure this variable exists to cure (issue #261).
+
+**Validation.** An extended URI has no built-in payload validator, so it takes
+the existing *Unsupported* path of whatever `I2SIG_STREAM_EVENT_VALIDATION` mode
+applies: `NONE` and `WARN` forward it, `ENFORCE` forwards it unvalidated, and
+`STRICT` **rejects** it. A deployment carrying a custom vocabulary under `STRICT`
+will reject its own events — use `ENFORCE` or lower for those streams, or supply
+a validator pack.
+
+**Scope in time.** The value is read per catalog lookup and parsed once per
+distinct value, so a restart is all that is needed to change it. It does not
+rewrite anything already persisted, and the two record kinds differ:
+
+- An **SSF stream** negotiates the extended catalog when it is **created**, and
+  again on a `PATCH` carrying `events_requested` — that re-negotiates against the
+  live catalog, so adding a vocabulary to an existing stream is a `PATCH`.
+- An **SSTP pair** negotiates only at **create**. `PATCH` on a pair is a narrow
+  whitelist (endpoint, peer pair id, per-direction `iss`/`aud`, event validation)
+  that does not touch events, so a pair provisioned before the vocabulary was
+  configured must be recreated to carry it.
+
+Records left untouched keep the `events_delivered` they negotiated earlier, and
+removing a vocabulary from the variable does not retract it from records that
+already negotiated it.
 
 ## Issuer
 
@@ -113,6 +166,9 @@ understands. They are documented in their natural section below.
 |-------------------------|-----------------------------------------------------------------------------------|-------------|
 | `I2SIG_ISSUER_DEFAULT`  | Default issuer identifier for the server.                                         | `{BASE_URL}` |
 | `I2SIG_ISSUER_TOKEN`    | Issuer identifier used for tokens generated by this server.                       | `DEFAULT`   |
+| `I2SIG_ISSUER_KEY_LIFETIME` | Validity period of generated signing keys (create, rotate) and of private keys uploaded without a certificate: a number of days (`180d`) or a Go duration (`12h`); `0` or `never` means they do not expire. A per-request `lifetime` query parameter overrides it; a key uploaded with its certificate takes the certificate's dates instead. The token issuer's key, startup-provisioned keys and verification-only keys never expire (ADR 0042). | `180d` |
+| `I2SIG_KEY_ALG` | Type of a key created with no explicit algorithm: `POST /key/{name}` without `?alg=` (create, replace, rotate), `KeyService.CreateKeyPair`, and the default issuer's key at first startup. One of `RS256`, `ES256` or `ML-DSA-65`; any other value stops `goSignalsServer` and `goSsfServer` at startup with an error naming the variable. The auth-token key is always RSA (auth tokens are RS256), whatever this says. A stream with no `signing_alg` signs with the issuer's newest active key of any type, so a new key of this type switches those streams to it (spec #114). | `ES256` |
+| `I2SIG_ISSUER_KEY_EXPIRY_WARNING` | How far ahead of a signing key's expiry the server starts WARNing: the background key check logs once a day per key, and a stream save inside the window WARNs. Same format as `I2SIG_ISSUER_KEY_LIFETIME`; `0` turns the warning off. | `30d` |
 
 ## Auth
 
@@ -130,6 +186,8 @@ understands. They are documented in their natural section below.
 | `I2SIG_BOOTSTRAP_TOKEN`           | Shared bootstrap secret. A bearer that constant-time-equals this value resolves to the narrow `key` scope (create a new issuer key + obtain a `reg`-only IAT). When unset, the anonymous `/iat` path is closed and no bootstrap bearer is accepted (fail closed). | _none_  |
 | `I2SIG_CLI_CLIENT_ID`             | Public OAuth `client_id` advertised in the server's RFC 9728 Protected Resource Metadata as the recommended client for the interactive `goSignals login` flow. | `gosignals-cli` |
 | `I2SIG_IAT_LIFETIME`              | Validity of minted Initial Access Tokens (IATs), as a Go duration (e.g. `24h`, `30m`). Invalid/empty falls back to the default. | `24h`   |
+| `I2SIG_BEARER_ROTATE_ON_GET`      | Enable rotate-on-GET of a stream's delivery bearer (ADR 0022). When truthy (`true`/`1`/`enabled`/`yes`, case-insensitive), a `GET /stream` authenticated by the stream's CURRENT server-issued bearer mints a replacement, persists it, returns the live value, and schedules the old bearer for deferred revocation. Any other authorized reader (admin/mgmt) gets a masked value and no rotation. Default off so receivers that re-read config without persisting the response are not revoked out from under themselves. Masking is NOT gated by this flag — credentials are always masked on reads. | `false` |
+| `I2SIG_BEARER_ROTATE_GRACE`       | Deferred-revocation grace window applied to the OLD bearer at rotation (ADR 0022), as a Go duration (e.g. `1h`, `30m`). During the window the old bearer still validates and a GET presenting it returns the same current bearer (lost-response recovery). `0` revokes immediately. Invalid/empty/negative falls back to the default. | `1h`    |
 
 ## Cluster
 
@@ -139,7 +197,9 @@ understands. They are documented in their natural section below.
 | `POD_NAME`                        | Kubernetes Downward API binding; used as fallback for `I2SIG_CLUSTER_NODE_ID` when running on k8s.                                                                                  | _none_                                        |
 | `I2SIG_CLUSTER_INTERNAL_TOKEN`    | Shared HMAC secret for intra-cluster wake-up calls. Required for clustered wake-ups when SPIFFE is not used.                                                                        | _none_                                        |
 | `I2SIG_CLUSTER_INTERNAL_PORT`     | Port for the internal cluster wake-up API. If unset, the main server port is reused.                                                                                                 | _none_                                        |
+| `I2SIG_CLUSTER_ADVERTISE_URL`     | Wake-up address this node advertises to its peers in `cluster_nodes` (e.g. `http://goSignals1b:8898`), stored verbatim. Set it when `BASE_URL` names a shared or load-balanced host, otherwise every node advertises the same address and wake-up calls reach only one of them; a node that sees a live peer advertising its own address logs a WARN naming both node ids. | `http://<BASE_URL host>:<I2SIG_CLUSTER_INTERNAL_PORT, else BASE_URL port>` |
 | `I2SIG_CLUSTER_NAME`              | Logical cluster identifier emitted as the `cluster_name` attribute on every log record. Observability metadata only — does not affect lease semantics. Omitted from logs when empty.| _none_                                        |
+| `I2SIG_LEASE_SAFETY_MARGIN`       | How long before a lease's recorded expiry a node stops acknowledging as its owner (Go duration, default `5s`). It covers clock drift and the time an acknowledgement batch takes to reach the store. A value over half the lease duration is capped at half (15s for the 30s production leases) and logged once at WARN; a negative value is treated as `0` and logged at WARN; an unparsable value falls back to the default. |
 
 ## Store_Mongo
 
@@ -151,7 +211,67 @@ understands. They are documented in their natural section below.
 | `I2SIG_STORE_MONGO_FALLBACK_MEM`          | If `false`, the server fails to start when it cannot connect to MongoDB. If `true`, it falls back to the in-memory provider.                 | `true`                                                 |
 | `I2SIG_STORE_MONGO_BACKGROUND_RECONNECT`  | If `true`, the server starts even when MongoDB is unreachable and retries the connection in the background. Used with `_FALLBACK_MEM=true`.  | `false`                                                |
 | `I2SIG_STORE_MONGO_WATCH_ENABLED`         | If `true`, the server uses MongoDB Change Streams to watch for new events. Deprecated in favour of cluster wake-ups + backfill.              | `false`                                                |
+| `I2SIG_STORE_WAL`                         | Ingest durability mode (ADR 0045). `majority` acknowledges a SET after the majority-journaled store write (ADR 0038). `local` acknowledges after an fsynced append to a node-local WAL, and a drain worker then moves it to the store. This is **single-node durable**: acknowledged SETs not yet drained are lost if this node's disk is lost. Case-insensitive. Any other value refuses start. `local` is a deployment ceiling, not a stream setting: only streams whose per-stream `durability` is `local` use the WAL, and every other stream keeps the majority contract (#343). In a cluster, `local` needs `I2SIG_STORE_WAL_RING_FED=true`: without it, a node that finds another active cluster node at startup (or cannot read cluster membership) logs an ERROR and refuses to start, naming both fixes (enable ring-fed delivery, or return to `majority`); a node already running that finds a peer on a later heartbeat logs the same ERROR and suspends local ingest on itself until restart (`durability=local` streams then run at majority; `goSignals_wal_local_ingest_suspended` reads 1). See `docs/Cluster.md`. | `majority` |
+| `I2SIG_STORE_WAL_DIR`                     | Directory for the local WAL (`ingest-*.seg` segment files plus `wal.lock`) when `I2SIG_STORE_WAL=local`. A relative path is relative to the working directory. Put it on persistent storage that survives a restart, and give every node its own directory: the directory is locked by one process, and a second node pointed at it refuses to start. A legacy bbolt `ingest.wal` found here is migrated on start. | `data/wal` |
+| `I2SIG_STORE_WAL_DRAIN_TIMEOUT`           | How long graceful stop may spend draining the local WAL to the store when `I2SIG_STORE_WAL=local` (#341). Stop closes ingest (new SETs get 503 + `Retry-After`), drains, and only then stops the delivery runners, which release their stream leases. If the store stays unreachable past this bound, the node logs the residual depth at ERROR and exits with the entries still on disk; they are replayed on its next start before ingest reopens. Keep it below the orchestrator's termination grace period. A Go duration (`20s`, `1m`) or a number of seconds. A bad or non-positive value falls back to the default with a warning. | `20s` |
+| `I2SIG_STORE_WAL_RING_FED`                | Ring-fed delivery when `I2SIG_STORE_WAL=local` (#342). `true` lets the push, poll and SSTP runners on this node read an acknowledged SET from the local WAL before the drain writes it to the store, so a slow drain no longer adds to delivery latency. Acks and pending clears taken before the drain are held in memory and written to the store right after the SET, before the WAL entry is truncated; a crash before that redelivers the SET (at-least-once). Parsed with `strconv.ParseBool`; a bad value refuses start. Ignored in majority mode. Required for `local` mode in a multi-node cluster (#343). See `docs/perf/ring-fed-342.md`. | `false` |
 | `I2SIG_TOKEN_RETENTION`                   | How long (in seconds, measured from a token's `exp`) an expired token record is retained in the management-plane token collection before MongoDB's TTL reaper deletes it. A revoked-but-unexpired record stays visible (reporting `active:false`) until retention lapses, so revocations remain auditable. Applied via a TTL index on `exp`; changing the value on a live deployment updates the index in place via `collMod` (no data migration). Mongo-only. | `2592000` _(30 days)_ |
+
+> **Per-stream `durability` (#343).** A stream's `StreamStateRecord` carries an
+> optional `durability` operator knob, set on stream create or update through
+> the management API (off the SSF wire-format `StreamConfiguration`, like
+> `event_validation`). Accepted values (case-insensitive): `majority` (the
+> default; an unset value means the same) and `local`. Any other value is
+> rejected with 400. `local` takes effect only on a node running
+> `I2SIG_STORE_WAL=local`. On a `majority` deployment the value is stored and
+> reported, the stream runs at majority, and the router logs one WARN per
+> stream the first time it ingests for it. The stream-state read surfaces
+> (`GET /states`, `GET /state`) also report the derived
+> `effective_durability` for the node that answers. For an SSTP pair, the
+> pair record's value governs the inbound leg.
+
+> **`I2SIG_TOKEN_RETENTION` is not event retention.** It expires records in the
+> management-plane *token* collection and nothing else. **Event** retention has
+> no environment variable at all: a community deployment keeps every SET
+> forever, because the per-stream `retention_window_days` window is unset by
+> default and no purge engine is bound to the live store. See
+> [Event retention](operations.md#event-retention) in the Operations Guide for
+> the consequences and what to do about it.
+
+### Mongo write concern
+
+Each collection handle sets its own write concern. The Mongo client sets none,
+and no environment variable changes these values. The table below is also in a
+code comment at the wiring site (`collectionWriteConcerns` in
+`internal/providers/dbProviders/mongo_provider/provider.go`). The provider uses
+no transactions.
+
+| Collection                                                          | Write concern         | Why                                                                                                                                  |
+|---------------------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `events`                                                            | `w:majority`, `j:true` | Ingest durability contract (ADR 0038). A SET is majority-acknowledged and journaled before it is acked.                             |
+| `deliveries`                                                        | `w:majority`, `j:true` | Same contract (ADR 0038). A pending delivery reference is stored before the ack. Acks run at `w:1` (see below). |
+| `cluster_leases`                                                    | `w:majority`, `j:true` | A lease grant acknowledged at `w:1` can roll back on a primary failover, and then two nodes would own one stream. Fencing tokens rely on majority. |
+| `cluster_nodes`                                                     | `w:1`                 | Heartbeat registry that is rewritten on every tick. A lost write is repaired by the next heartbeat.                                  |
+| `streams`, `keys`, `clients`, `servers`, `tokens`, `subject_filters` | `w:1`                 | Admin and configuration state. It is outside the ingest contract.                                                                    |
+
+The one-trip ingest write (ADR 0043) is a client-level multi-namespace
+`bulkWrite`. That call ignores the collection handles' concerns and uses the
+client's concern. The client sets none, so without an explicit concern the call
+would fall back to the server default. The call therefore sets `w:majority`,
+`j:true` itself (`EventStoreWriteConcern` in `internal/dao/mongo/event_dao.go`).
+The fallback path on Mongo older than 8.0 uses the `events` and `deliveries`
+handles, which are majority.
+
+An ack (#359) is one conditional `updateMany` on `deliveries` that flips the
+stream's pending references whose `ackJti` matches to `delivered`, plus the
+inserts of any outbound copies into `events`. On Mongo 8.0+ both go in one
+unordered client-level `bulkWrite`; below 8.0 they are two writes. Both paths
+run at `w:1`. If a primary failover rolls the state flip back, the SET is
+delivered again and the receiver discards it by JTI. Ingest durability (ADR
+0038) is unchanged, because an ack happens after the SET is stored.
+
+A `w=` or `journal=` option in `MONGO_URL` sets a client-level concern. That
+concern is still overridden by every handle above and by the one-trip call.
 
 ## Store_Mem
 
@@ -159,6 +279,15 @@ understands. They are documented in their natural section below.
 |--------------------------------|----------------------------------------------------------------------------------------------------------|-------------------------------|
 | `I2SIG_STORE_MEM_DIRECTORY`    | Directory where the memory provider persists state to disk.                                              | `config/{dbName}`             |
 | `I2SIG_STORE_MEM_SAVE_RATE`    | Interval in seconds between periodic saves. `0` means write on every change.                             | `30`                          |
+
+## Store_GroupCommit
+
+Applies to both the Mongo and the memory provider. Concurrent event-body writes (`Insert`/`InsertMany`) and, per stream, pending-marker writes (`AddPending`/`AddPendingMany`) that arrive within the window are coalesced into one bulk write on the store. Each caller still gets its own result: a duplicate JTI (ADR 0017) is reported only to the caller that submitted it, and a batch that fails as a whole returns its error to every caller in it. Durability is unchanged — no caller is answered before the coalesced majority-journaled write completes (ADR 0038). A single call already carrying `I2SIG_STORE_GROUP_COMMIT_MAX` or more items bypasses the batcher.
+
+| Variable                           | Description                                                                                                                                                                                  | Default |
+|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `I2SIG_STORE_GROUP_COMMIT_WINDOW`  | Longest a batch waits for further callers after it opens, as a Go duration (`1ms`, `500us`). A batch flushes earlier once it reaches the maximum. `0` disables batching: calls go to the store 1:1, exactly as without the batcher. An unparsable or negative value logs a warning and uses the default. | `1ms`   |
+| `I2SIG_STORE_GROUP_COMMIT_MAX`     | Maximum items (records or pending JTIs) in one coalesced write. `1` disables batching. A non-integer or value below `1` logs a warning and uses the default.                                    | `128`   |
 
 ## Push
 
@@ -168,12 +297,16 @@ Defaults shown as Go `time.Duration` strings (e.g. `1s`, `5m`, `6h`).
 |---------------------------------------|------------------------------------------------------------------------------------------------------------------------------|---------|
 | `I2SIG_PUSH_BACKFILL_INTERVAL`        | Interval at which the transmitter re-reads pending JTIs from MongoDB when its in-memory buffer is empty.                     | `1s`    |
 | `I2SIG_PUSH_BACKFILL_BATCH`           | Maximum number of events fetched in one backfill operation.                                                                  | `100`   |
+| `I2SIG_PUSH_CONCURRENCY`              | RFC 8935 POSTs a push stream keeps in flight at once (worker pool per stream). Unset, it is derived from the processors the server can see (ADR 0037). The loop drains up to 4x this many buffered JTIs per batch, reads and acks them as a batch, and stops dispatching on the first failure; delivery order inside a batch is not guaranteed. **That 4x is also the ack-deferral window** — a crash mid-batch resends up to that many SETs the receiver already accepted (32 at the floor, 56 on a 14-processor host, 128 at the ceiling), which receivers drop on `jti` dedup. **Raising it trades ingest throughput for delivery throughput**: delivery and ingest compete for the same processors, and on the ADR 0037 sweep going from 5 to 24 took push from 417 to 583 ev/s while ingest fell from 1021 to 619 ev/s. Pin it low to favour ingest admission, high to feed a slow receiver, `1` for serial POSTs. An explicit value is not clamped. **Pipelining (#339, ADR 0044):** a stream keeps K = min(this, `I2SIG_DELIVERY_INFLIGHT_MAX` / (4x this)) batches in flight, at least 1 — K=4 at 14 or 16 with the default bound, and `1` gives K=1. **Ordering:** above `1` this is the weakest leg for delivery order — with several POSTs in flight the order the receiver observes is decided by its own scheduling and contention, not by dispatch order. If push is mandatory and order is important, set this to `1` **and sort the received SETs on `jti`** — `1` serialises dispatch, but it does not impose a total order across ingest batches that arrived concurrently, because a batch is submitted to the push buffer only after its body write joins (ADR 0038); if the leg is negotiable, poll and SSTP preserve order at no throughput cost, because their batch is atomic and the receiver recovers issue order by sorting `jti` (ADR 0040). See ADR 0035, ADR 0037 and ADR 0040. | `GOMAXPROCS`, clamped to 8..32 |
+| `I2SIG_DELIVERY_INFLIGHT_MAX`         | Upper bound on the JTIs one delivery runner (push stream or SSTP pair) holds in flight: taken for sending and not yet acked or handed back (#336). A runner sends its next batch while the previous batch's ack is still being written; when the set is full it waits for an ack write to finish, so this is the delivery back-pressure. It is floored at the push batch size (4x `I2SIG_PUSH_CONCURRENCY`) so one batch always fits. It also sets how many push batches a stream keeps in flight (K = this / push batch, capped at `I2SIG_PUSH_CONCURRENCY`, ADR 0044), and the default number of SSTP second pushes (`I2SIG_SSTP_PUSH_INFLIGHT`); a value at or below one push batch gives K=1. **This is also the ack-deferral window:** a SET sent but not yet acked stays pending in the store, so a crash or a lost lease redelivers up to this many SETs per stream that the receiver may already have accepted, which receivers drop on `jti` dedup (ADR 0038). A clean stop flushes queued acks first and redelivers nothing already accepted. An invalid value warns and uses the default. | `256` |
+| `I2SIG_ACK_COALESCE_WINDOW`           | How long the delivery acker collects completed batches before writing their acks as one store write (a Go duration, e.g. `5ms`) (#336). The queue is also written early once it holds half of `I2SIG_DELIVERY_INFLIGHT_MAX`. `0` writes each batch's ack inline before the next batch is sent, as before #336. A stale fencing token (the lease moved to another node) refuses the write: the SETs stay pending for the new owner and the push runner stops. An invalid value warns and uses the default. | `5ms` |
+| `I2SIG_SSTP_PUSH_INFLIGHT`           | How many push-while-poll-held batches one SSTP-client pair keeps in flight (K, #339, ADR 0044). Each second push takes a disjoint claim of up to `I2SIG_PUSH_BACKFILL_BATCH` SETs, carries `returnEvents=false` and no `Ack`, and its acks coalesce with the pair's other acks (#336), so the wire exchange is unchanged. Unset, it is the number of full claims that fit in `I2SIG_DELIVERY_INFLIGHT_MAX`, clamped to 1..4 (256 / 100 = 2 with the defaults). `1` is the single second-push slot from before #339 (Q7.2). An explicit positive value is not clamped. An invalid value warns and uses the default. | `I2SIG_DELIVERY_INFLIGHT_MAX` / `I2SIG_PUSH_BACKFILL_BATCH`, clamped 1..4 (`2`) |
 | `I2SIG_PUSH_RETRY_BASE_DELAY`         | Initial delay between `/status` probes when push enters TransportBackoff recovery (transport errors / HTTP 5xx).             | `1s`    |
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR`     | Multiplier applied to the delay after each TransportBackoff probe.                                                           | `2.0`   |
 | `I2SIG_PUSH_RETRY_MAX_DELAY`          | Cap on a single TransportBackoff sleep — exponential growth never exceeds this between probes.                               | `5m`    |
 | `I2SIG_PUSH_RETRY_LIMIT`              | Total elapsed wall time inside TransportBackoff before the stream is disabled.                                               | `6h`    |
-| `I2SIG_PUSH_AUTH_RETRY_DELAY`         | Sleep between `/status` probes while in AuthBounded recovery (HTTP 401 path).                                                | `15s`   |
-| `I2SIG_PUSH_AUTH_RETRY_LIMIT`         | Maximum AuthBounded probe attempts before the stream is disabled.                                                            | `10`    |
+| `I2SIG_PUSH_AUTH_RETRY_DELAY`         | Sleep between `/status` probes while in AuthBounded recovery (HTTP 401 path). Also the delay between signing-key retries while a signing push transmitter has no active key, and the interval of the key check for poll transmitters and SSTP pairs paused for a missing key. | `15s`   |
+| `I2SIG_PUSH_AUTH_RETRY_LIMIT`         | Maximum AuthBounded probe attempts before the stream is disabled. Also the number of failed signing-key retries before a signing push transmitter with no active key is disabled; a poll transmitter or SSTP pair paused for a missing key is disabled once this times `I2SIG_PUSH_AUTH_RETRY_DELAY` has passed. | `10`    |
 | `I2SIG_PUSH_PROBE_INTERVAL`           | Cadence at which recoveryLoop re-checks `/status` once it has confirmed the receiver is paused (PausedByRemote mode).        | `30s`   |
 | `I2SIG_PUSH_KEEPALIVE_INTERVAL`       | Idle period after which the push loop generates a real SSF verification SET as a keepalive. Set to `0` to disable.            | `5m`    |
 
@@ -192,8 +325,9 @@ as floating-point seconds.
 | `I2SIG_POLL_AUTH_RETRY_DELAY`       | Sleep, in seconds, between auth-rejection retries on the poll path.                                                          | `15`           |
 | `I2SIG_POLL_AUTH_RETRY_LIMIT`       | Max auth-rejection retry attempts before disabling the stream.                                                               | `10`           |
 | `I2SIG_POLL_RESPECT_STATUS`         | `true` (default) — pause polling when the transmitter reports `paused`/`disabled`. `false` — keep polling regardless.        | `true`         |
+| `I2SIG_POLL_PIPELINE_DEPTH`        | Polls a poll receiver keeps outstanding against one upstream transmitter (#338). The next poll is sent as soon as the previous 200 response starts to arrive, or at once when acks are waiting. Acks for a response ride the next poll sent after that response is stored, and a SET whose store failed is not acked, so the transmitter sends it again. `1` sends one poll at a time, as before #338. A value above `4` is clamped to `4` with a WARN; a value that is not a positive integer warns and uses the default. Against a transmitter without disjoint claims (#337) overlapping polls can return the same SET twice; JTI dedup absorbs it. | `2`            |
 
-### Poll transmitter — long-poll timeouts
+### Poll transmitter — long-poll timeouts and response assembly
 
 Inbound poll requests served by this transmitter. Read once at server startup;
 must be set uniformly across cluster nodes to avoid receiver-visible variance.
@@ -202,6 +336,17 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 |--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | `I2SIG_POLL_DEFAULT_TIMEOUT`   | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                          | `30`    |
 | `I2SIG_POLL_MAX_TIMEOUT`       | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                       | `300`   |
+| `I2SIG_POLL_CLAIM_TTL`         | How long a poll response claims the SETs it returns (#337). A claimed SET is skipped by an overlapping poll on the same stream, so two outstanding polls get disjoint batches. A claim ends when the SET is acked, when the poll that took it fails to sign, or when the TTL passes; an unacked SET is then served again (at-least-once, ADR 0038). A long poll that finds only claimed SETs waits for new events or for a claim to expire. Integer seconds or a Go duration (`500ms`). Set to `0` to take no claims, so every poll re-receives the whole unacked batch (the pre-#337 behaviour). Claims are held in the serving node's memory only: they are not persisted and are lost on restart, and they deduplicate polls served by the same node. | `30`    |
+| `I2SIG_SIGN_CONCURRENCY`       | Worker pool that re-signs the SETs of one outbound message: an RFC 8936 poll response, an SSTP responder response, or an SSTP initiator request. The message's event records are read in one query and signed this many at a time; forward-mode streams do not sign and are unaffected. Set to `1` to sign serially. This does not affect delivery order: the pool writes into an indexed slice and the assembled `sets` member is a `jti`-keyed object either way (ADR 0040). See ADR 0036.                    | `GOMAXPROCS` |
+
+> **SSTP reuses the poll knobs.** SSTP defines **no** delivery-timeout or
+> retry env vars of its own. The SSTP **server (responder)** side applies
+> `I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT` to its outbound
+> long-poll wait, and the SSTP **client (initiator)** side applies
+> `I2SIG_POLL_RETRY_BASE_DELAY` / `I2SIG_POLL_RETRY_MAX_DELAY` /
+> `I2SIG_POLL_RETRY_BACKOFF_FACTOR` to its transport/transient backoff. The
+> plaintext initiator endpoint needs the pair's `tx_allow_plaintext` opt-out (see **Stream** above).
+> See [docs/SSTP.md](SSTP.md).
 
 ## TLS
 
@@ -211,6 +356,15 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 | `I2SIG_TLS_CERT_PATH`  | Path to the PEM-encoded server certificate.                                                                       | `config/certs/server-cert.pem`   |
 | `I2SIG_TLS_KEY_PATH`   | Path to the PEM-encoded server private key.                                                                       | `config/certs/server-key.pem`    |
 | `I2SIG_TLS_CA_CERT`    | Path to the CA certificate PEM file. Used to trust the server in clients and to sign certificates via `genTlsKeys`. | `config/certs/ca-cert.pem`      |
+| `I2SIG_TLS_PQ_KEM`     | Post-quantum key exchange offered by every TLS config the server and CLI build. `X25519MLKEM768` (the default) leaves the choice to the Go toolchain, which already leads with the X25519MLKEM768 hybrid and adds new mechanisms as they ship. `MLKEM1024` additionally offers standalone ML-KEM-1024 for deployments whose policy requires NIST category 5. An unrecognised value logs a WARN and falls back to the default. | `X25519MLKEM768` |
+
+> **Note.** `MLKEM1024` widens the *offered* set; it cannot reorder it. `crypto/tls` treats
+> `CurvePreferences` as an allow-list and selects from it using its own internal preference
+> order, so the X25519MLKEM768 hybrid and the classical curves stay in the list — dropping
+> them could not promote ML-KEM-1024, only break peers (ML-KEM is TLS 1.3-only).
+> Every TLS configuration in the project sets `MinVersion` to TLS 1.2 explicitly; a guard
+> test in `pkg/tlsSupport` fails the build if a new `tls.Config` omits it or bypasses the
+> policy helper.
 
 ## SPIFFE
 
@@ -225,6 +379,9 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 | Variable              | Description                                                                                          | Default |
 |-----------------------|------------------------------------------------------------------------------------------------------|---------|
 | `PAUSE_FOR_DEBUG`     | Mongo provider pauses for a debugger attach if set to `TRUE`. Development use only — never set in production. | _unset_ |
+| `I2SIG_PPROF_ADDR`    | When set to a listen address (e.g. `:6060`, `127.0.0.1:6060`) the server starts a separate **plain-HTTP, unauthenticated** listener serving Go's `net/http/pprof` endpoints under `/debug/pprof/` (cpu `profile`, `heap`, `goroutine`, `allocs`, `block`, `mutex`, `trace`). Applies to both `goSignalsServer` and `goSsfServer`. Bind only to loopback/private addresses; never set in production. `docker-compose-dev.yml` sets it on every node — see [`perf/pprof.md`](perf/pprof.md). | _unset_ |
+| `I2SIG_PPROF_MUTEX_FRACTION` | Fraction passed to `runtime.SetMutexProfileFraction`, making `/debug/pprof/mutex` report lock contention: `1` samples every contention event, `N` roughly one in `N`. **Read only when `I2SIG_PPROF_ADDR` is set**; unset, zero or unparseable leaves mutex profiling off. Sampling adds overhead on contended locks, so enable it for a diagnostic run rather than permanently. | _unset_ (off) |
+| `I2SIG_PPROF_BLOCK_RATE` | Rate passed to `runtime.SetBlockProfileRate`, making `/debug/pprof/block` show where goroutines wait on channels and sync primitives. The value is nanoseconds of blocking per sample: `1` records every blocking event, `10000` roughly one sample per 10&nbsp;µs blocked. **Read only when `I2SIG_PPROF_ADDR` is set**; unset, zero or unparseable leaves block profiling off. Block profiling instruments *every* blocking operation, so its cost scales with the blocking-event rate — it is the broader of the two knobs. Turn it on for a diagnostic run and off again, and note whether it was set alongside any throughput number (see [`perf/pprof.md`](perf/pprof.md#overhead)). | _unset_ (off) |
 
 ## `goSignals` CLI
 
@@ -249,6 +406,7 @@ Run it via `make generate-certs`.
 | `CERT_COUNTRY`    | Country code (e.g. `CA`).                                                | `CA`                       |
 | `CERT_PROV`       | Province/State (e.g. `BC`).                                              | `BC`                       |
 | `CERT_LOCALITY`   | Locality/City (e.g. `Vancouver`).                                        | `Vancouver`                |
+| `CERT_KEY_ALG`    | Key algorithm for the generated CA and leaf certificates: `RSA` (RSA-4096) or `ML-DSA-65` (post-quantum, FIPS 204 — Go 1.27+). Applies to internal mTLS only and is independent of a stream's `signing_alg` (ADR 0034). An unrecognised value is an error, not a fallback. | `RSA` |
 
 ---
 

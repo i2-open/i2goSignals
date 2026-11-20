@@ -8,6 +8,7 @@
 /config/scim/ca-bundle.pem
 /config/scim/cluster-scim-issuer.pem
 /config/scim/config.json
+/config/scim/scim_cluster.env
 /config/scim/iat-gosignals1.jwt
 /bin/linux/arm64/cluster-monitor
 /bin/linux/arm64/genTlsKeys
@@ -15,6 +16,7 @@
 /bin/linux/arm64/goSignalsServer
 /bin/linux/arm64/goSsfServer
 /bin/linux/arm64/healthcheck
+/goSignalsBench
 /bin/
 /cluster-monitor
 /genTlsKeys
@@ -35,5 +37,16 @@
 /.sandcastle/plan-prompt.md
 /.idea/go.imports.xml
 /.idea/vcs.xml
+/.idea/
 __debug_bin*
 /graphify-out/
+# Ephemeral go.work written by `make seams`; the git-tag pin is the single
+# source of truth for cross-repo deps, so go.work is never committed (ADR 0048).
+/go.work
+/go.work.sum
+# Transient go.mod/go.sum backups written by `make tidy-check`; the trap
+# removes them on every exit path, but a hard kill can leave them behind.
+/go.mod.qa-backup
+/go.sum.qa-backup
+# spec-111 baseline test output kept for local comparison
+/.spec-111-baseline-tests.txt

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/internal/dao/memory"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -203,12 +203,12 @@ func (pm *PersistenceManager) LoadState() {
 		pOk := pm.loadFile("pending_events.json", &pending)
 		dOk := pm.loadFile("delivered_events.json", &delivered)
 
-		events := make(map[string]*model.AgEventRecord)
+		events := make(map[string]*model.EventRecord)
 		eventFiles, _ := filepath.Glob(filepath.Join(pm.directory, "events", "*.set"))
 		for _, file := range eventFiles {
 			data, err := os.ReadFile(file)
 			if err == nil {
-				var rec model.AgEventRecord
+				var rec model.EventRecord
 				if err := json.Unmarshal(data, &rec); err == nil {
 					rec.Original = ""
 					events[rec.Jti] = &rec

@@ -175,7 +175,7 @@ func (m *Monitor) checkMongoCluster(ctx context.Context) {
 	}
 
 	var status bson.M
-	err = client.Database("admin").RunCommand(checkCtx, bson.D{{"replSetGetStatus", 1}}).Decode(&status)
+	err = client.Database("admin").RunCommand(checkCtx, bson.D{{Key: "replSetGetStatus", Value: 1}}).Decode(&status)
 	if err != nil {
 		log.Warn("Could not get MongoDB replica set status", "error", err)
 		return

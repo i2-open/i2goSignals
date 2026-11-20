@@ -77,6 +77,136 @@ type OIDCConfiguration struct {
 	ClaimsSupported        []string `json:"claims_supported,omitempty"`
 }
 
+// InsertWellKnownURL builds the single, spec-correct discovery URL by inserting
+// the well-known component between the host and the issuer path, per RFC 8615
+// and SSF §7.2 (Figure 17). Unlike BuildWellKnownURLs, this returns exactly one
+// deterministic URL and never appends — callers that must match the OpenID SSF
+// transmitter routing (e.g. the admin CLI's `add server`) require insertion.
+//
+//	https://tr.example.com/issuer1 -> https://tr.example.com/.well-known/ssf-configuration/issuer1
+//	https://tr.example.com         -> https://tr.example.com/.well-known/ssf-configuration
+func InsertWellKnownURL(baseURL string, wellKnownPath string) (string, error) {
+	if baseURL == "" {
+		return "", errors.New("baseURL is empty")
+	}
+	if wellKnownPath == "" {
+		return "", errors.New("wellKnownPath is empty")
+	}
+
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "https://" + baseURL
+	}
+
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+
+	wellKnownPath = "/" + strings.TrimPrefix(wellKnownPath, "/")
+
+	issuerPath := strings.Trim(u.Path, "/")
+	if issuerPath == "" {
+		u.Path = wellKnownPath
+	} else {
+		u.Path = wellKnownPath + "/" + issuerPath
+	}
+	return u.String(), nil
+}
+
+// normalizeIssuerURL canonicalizes an issuer/location URL for the SSF §7.2.4
+// binding comparison: scheme and host are lowercased (RFC 3986 case-insensitive
+// components) and a single trailing slash is trimmed. The path is left
+// case-sensitive. An empty/blank input normalizes to "".
+func normalizeIssuerURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return strings.ToLower(strings.TrimRight(s, "/"))
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String()
+}
+
+// IssuerMatchesLocation reports whether a transmitter's advertised metadata
+// issuer is consistent with the location its discovery document was retrieved
+// from — the bare SSF §7.2.4 fact, with NO enforcement policy attached.
+// Comparison is scheme/host case-insensitive and ignores a single trailing
+// slash (the path stays case-sensitive per RFC 3986). An empty metadataIssuer
+// never matches (the transmitter advertised no issuer, which is itself a
+// §7.2.4 violation).
+//
+// This is the policy-free primitive: callers that must only *surface* a
+// mismatch (e.g. a pre-registration discovery probe where no StrictSsf posture
+// is committed yet) use this directly and decide their own warn/render
+// behavior, rather than calling EvaluateIssuerBinding with a meaningless
+// strict=false purely to dodge its error branch. jwks_uri is intentionally not
+// a parameter: it is free-form and must never be coupled to iss/issuer.
+func IssuerMatchesLocation(metadataIssuer, discoveryLocation string) bool {
+	mi := normalizeIssuerURL(metadataIssuer)
+	if mi == "" {
+		return false
+	}
+	return mi == normalizeIssuerURL(discoveryLocation)
+}
+
+// IssuerBindingDetail returns a human-readable description of an SSF §7.2.4
+// issuer↔discovery-location mismatch, WITHOUT deciding warn-vs-fail. It returns
+// "" exactly when IssuerMatchesLocation reports true (a consistent binding has
+// nothing to describe). Like IssuerMatchesLocation this is policy-free: a
+// visibility-only consumer renders this string in its own dialog copy, while
+// the enforcement callers go through EvaluateIssuerBinding.
+func IssuerBindingDetail(metadataIssuer, discoveryLocation string) string {
+	if IssuerMatchesLocation(metadataIssuer, discoveryLocation) {
+		return ""
+	}
+	advertised := metadataIssuer
+	if strings.TrimSpace(advertised) == "" {
+		advertised = "(none advertised)"
+	}
+	return fmt.Sprintf(
+		"SSF §7.2.4 issuer binding mismatch: transmitter discovery document advertises issuer %q but was retrieved from %q; these MUST match to prevent transmitter impersonation (jwks_uri is free-form and is not part of this check)",
+		advertised, discoveryLocation)
+}
+
+// EvaluateIssuerBinding checks the SSF §7.2.4 issuer↔discovery-location binding:
+// the `issuer` advertised inside a transmitter's discovery document MUST equal
+// the location that document was retrieved from (the host + issuer path the
+// .well-known/ssf-configuration URL was built from), to prevent transmitter
+// impersonation. It is the symmetric counterpart of the OpenID conformance
+// suite's OIDSSFCheckTransmitterMetadataIssuer.
+//
+// jwks_uri is intentionally NOT a parameter: it is free-form (any HTTPS URL
+// serving the issuer's keys) and must never be required to equal iss/issuer.
+// Keeping it out of this signature structurally prevents anyone from coupling
+// the two.
+//
+// Comparison is scheme/host case-insensitive and ignores a single trailing
+// slash (the path stays case-sensitive per RFC 3986). On a consistent binding
+// it returns ("", nil). On a mismatch the behavior is keyed off the peer's
+// operator-declared strict posture (model.Server.StrictSsf / the CLI's
+// --strict-ssf — NOT the goSsfServer-only I2SIG_STRICT_SSF env flag):
+//
+//   - strict == true  -> ("", error): abort. The peer claims to be a strict,
+//     properly-administered SSF transmitter, so a mismatch is an impersonation
+//     or misconfiguration signal that must not be recorded.
+//   - strict == false -> (warning, nil): the caller logs the warning and
+//     continues (the flexible default; the binding is advisory).
+func EvaluateIssuerBinding(metadataIssuer, discoveryLocation string, strict bool) (string, error) {
+	detail := IssuerBindingDetail(metadataIssuer, discoveryLocation)
+	if detail == "" {
+		return "", nil
+	}
+	if strict {
+		return "", errors.New(detail)
+	}
+	return detail, nil
+}
+
 // BuildWellKnownURLs generates candidate URLs for a well-known endpoint.
 // It follows RFC 8414 logic for inserting .well-known and also handles simple appending.
 func BuildWellKnownURLs(baseURL string, wellKnownPath string) ([]string, error) {
@@ -131,6 +261,30 @@ func BuildWellKnownURLs(baseURL string, wellKnownPath string) ([]string, error) 
 	return candidates, nil
 }
 
+// HTTPStatusError is returned by Fetch and CheckWellKnown when a well-known
+// endpoint responds with a non-2xx HTTP status. It carries the status code so
+// callers can branch on it programmatically — e.g. falling back to a legacy
+// discovery path only on a 404 (endpoint absent) and surfacing every other
+// status directly, rather than masking the primary attempt (GH #209).
+type HTTPStatusError struct {
+	URL        string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("request to %s failed with status %d: %s", e.URL, e.StatusCode, e.Body)
+}
+
+// isNotFound reports whether err's chain carries an HTTPStatusError with a 404
+// status — the only condition under which the legacy sse-configuration fallback
+// may engage. A transport error, decode error, or any non-404 status returns
+// false so the primary error surfaces unmasked.
+func isNotFound(err error) bool {
+	var statusErr *HTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
+}
+
 // FetchWellKnown retrieves and decodes a well-known configuration from the given baseURL.
 // It uses both insertion and appending strategies to find the endpoint.
 func FetchWellKnown[T any](ctx context.Context, client *http.Client, baseURL string, wellKnownPath string) (*T, error) {
@@ -174,7 +328,7 @@ func Fetch[T any](ctx context.Context, client *http.Client, targetURL string) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("request to %s failed with status %d: %s", targetURL, resp.StatusCode, string(body))
+		return nil, &HTTPStatusError{URL: targetURL, StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	var result T
@@ -214,7 +368,7 @@ func CheckWellKnown(ctx context.Context, client *http.Client, baseURL string, we
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("request to %s failed with status %d: %s", targetURL, resp.StatusCode, string(body))
+			lastErr = &HTTPStatusError{URL: targetURL, StatusCode: resp.StatusCode, Body: string(body)}
 			continue
 		}
 		_ = resp.Body.Close()
@@ -225,25 +379,48 @@ func CheckWellKnown(ctx context.Context, client *http.Client, baseURL string, we
 	return fmt.Errorf("could not reach well-known configuration at %s: %w", baseURL, lastErr)
 }
 
-// CheckSSFConfiguration verifies that an SSF configuration exists and is reachable.
+// CheckSSFConfiguration verifies that an SSF configuration exists and is
+// reachable. It probes the spec ssf-configuration path first and falls back to
+// the legacy sse-configuration path ONLY when the spec endpoint is absent (HTTP
+// 404) — never on a transport error, decode error, or other non-404 status,
+// which surface directly. If the fallback also fails, the returned error still
+// carries the primary ssf-configuration failure so the operator is never shown
+// only a fabricated sse-configuration URL (GH #209).
 func CheckSSFConfiguration(ctx context.Context, client *http.Client, baseURL string) error {
-	err := CheckWellKnown(ctx, client, baseURL, SSFConfigurationPath)
-	if err != nil {
-		// Try fallback to sse-configuration
-		err = CheckWellKnown(ctx, client, baseURL, SSEConfigurationPath)
+	primaryErr := CheckWellKnown(ctx, client, baseURL, SSFConfigurationPath)
+	if primaryErr == nil {
+		return nil
 	}
-	return err
+	if !isNotFound(primaryErr) {
+		return primaryErr
+	}
+	if fallbackErr := CheckWellKnown(ctx, client, baseURL, SSEConfigurationPath); fallbackErr == nil {
+		return nil
+	} else {
+		return fmt.Errorf("%w (legacy sse-configuration fallback also failed: %v)", primaryErr, fallbackErr)
+	}
 }
 
-// FetchSSFConfiguration retrieves the SSF configuration.
+// FetchSSFConfiguration retrieves the SSF configuration. It fetches the spec
+// ssf-configuration path first and falls back to the legacy sse-configuration
+// path ONLY when the spec endpoint is absent (HTTP 404); a transport error,
+// decode error, or other non-404 status surfaces directly from the primary
+// attempt. If the fallback also fails, the returned error still carries the
+// primary ssf-configuration failure rather than a fabricated sse-configuration
+// URL (GH #209).
 func FetchSSFConfiguration(ctx context.Context, client *http.Client, baseURL string) (*model.TransmitterConfiguration, error) {
-	// SSF spec uses /ssf-configuration, but some use /sse-configuration
-	res, err := FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSFConfigurationPath)
-	if err != nil {
-		// Try fallback to sse-configuration
-		res, err = FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSEConfigurationPath)
+	res, primaryErr := FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSFConfigurationPath)
+	if primaryErr == nil {
+		return res, nil
 	}
-	return res, err
+	if !isNotFound(primaryErr) {
+		return res, primaryErr
+	}
+	res, fallbackErr := FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSEConfigurationPath)
+	if fallbackErr == nil {
+		return res, nil
+	}
+	return res, fmt.Errorf("%w (legacy sse-configuration fallback also failed: %v)", primaryErr, fallbackErr)
 }
 
 // FetchOpenIDConfiguration retrieves the OpenID configuration.
@@ -254,4 +431,25 @@ func FetchOpenIDConfiguration(ctx context.Context, client *http.Client, baseURL 
 // FetchProtectedResourceMetadata retrieves the Protected Resource Metadata (RFC 9728).
 func FetchProtectedResourceMetadata(ctx context.Context, client *http.Client, baseURL string) (*model.ProtectedResourceMetadata, error) {
 	return FetchWellKnown[model.ProtectedResourceMetadata](ctx, client, baseURL, OAuthProtectedResourcePath)
+}
+
+// FetchOAuthAuthorizationServerRaw retrieves an authorization server's RFC 8414
+// metadata document verbatim (as raw JSON). It tries the
+// oauth-authorization-server document first and falls back to the OpenID Provider
+// openid-configuration (an OAuth AS commonly serves both, e.g. Keycloak). The
+// bytes are returned unmodified — using json.RawMessage so no field is dropped —
+// so callers that reflect the document (a discovery proxy) preserve every field
+// of the real authorization server. On failure the returned error carries the
+// primary oauth-authorization-server attempt, with the openid-configuration
+// fallback noted, mirroring FetchSSFConfiguration's non-masking discipline.
+func FetchOAuthAuthorizationServerRaw(ctx context.Context, client *http.Client, baseURL string) (json.RawMessage, error) {
+	raw, primaryErr := FetchWellKnown[json.RawMessage](ctx, client, baseURL, OAuthAuthorizationServerPath)
+	if primaryErr == nil {
+		return *raw, nil
+	}
+	raw, fallbackErr := FetchWellKnown[json.RawMessage](ctx, client, baseURL, OpenIDConfigurationPath)
+	if fallbackErr == nil {
+		return *raw, nil
+	}
+	return nil, fmt.Errorf("%w (openid-configuration fallback also failed: %v)", primaryErr, fallbackErr)
 }

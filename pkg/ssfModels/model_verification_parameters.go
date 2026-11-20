@@ -9,6 +9,11 @@
 package model
 
 type VerificationParameters struct {
+	// REQUIRED. The stream_id identifying the Event Stream for which a verification
+	// event is requested (SSF 1.0 §8.1.4.2). When the receiver registered against a
+	// foreign transmitter this is the transmitter-assigned (remote) stream_id.
+	StreamId string `json:"stream_id,omitempty"`
+
 	// OPTIONAL. An arbitrary string that the Event Transmitter MUST echo back to the Event Receiver in the verification event’s payload. Event Receivers MAY use the value of this parameter to correlate a verification event with a verification request. If the verification event is initiated by the transmitter then this parameter MUST not be set.
 	State string `json:"state,omitempty"`
 }

@@ -5,17 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // createTestSET creates a signed SET token string for testing.
@@ -35,10 +33,10 @@ func generateTestKey(t *testing.T) *rsa.PrivateKey {
 	return key
 }
 
-func createTestJWKS(t *testing.T, key *rsa.PrivateKey) *keyfunc.JWKS {
+func createTestJWKS(t *testing.T, key *rsa.PrivateKey) *goSet.JWKS {
 	t.Helper()
-	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
-	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{"test-kid": givenKey})
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey}
+	jwks := goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{"test-kid": givenKey})
 	return jwks
 }
 
@@ -55,29 +53,36 @@ func buildPushRequest(t *testing.T, body string, contentType string) *http.Reque
 
 func TestParseReceivedSET_ValidToken(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://issuer.example.com", []string{"https://audience.example.com"}, key)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, []string{"https://audience.example.com"}, key)
 
-	// Parse without signature verification (no JWKS)
+	// Per ADR-0066 §D2, the receiver requires a configured trust anchor —
+	// provide a matching JWKS so signature verification succeeds.
 	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
 	config := ReceiverConfig{
-		ExpectedIssuer:    "https://issuer.example.com",
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{"https://audience.example.com"},
 	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
 	require.NotNil(t, result)
-	assert.Equal(t, "https://issuer.example.com", result.Token.Issuer)
+	assert.Equal(t, iss, result.Token.Issuer)
 	assert.Equal(t, tokenString, result.TokenString)
 }
 
 func TestParseReceivedSET_EmptyContentType(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://issuer.example.com", nil, key)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, nil, key)
 
-	// Empty Content-Type should be accepted (per existing behavior)
+	// Empty Content-Type should be accepted (per existing behavior). Trust
+	// anchor is required by ADR-0066 §D2.
 	req := buildPushRequest(t, tokenString, "")
-	config := ReceiverConfig{}
+	config := ReceiverConfig{
+		JWKS: jwksForKey(t, iss, key),
+	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
@@ -147,10 +152,14 @@ func TestParseReceivedSET_InvalidAudience(t *testing.T) {
 
 func TestParseReceivedSET_SkipIssuerValidation(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://any-issuer.example.com", nil, key)
+	iss := "https://any-issuer.example.com"
+	tokenString := createTestSET(t, iss, nil, key)
 
 	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
-	config := ReceiverConfig{} // no ExpectedIssuer set
+	// no ExpectedIssuer set — but trust anchor still required (ADR-0066 §D2).
+	config := ReceiverConfig{
+		JWKS: jwksForKey(t, iss, key),
+	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
@@ -159,14 +168,160 @@ func TestParseReceivedSET_SkipIssuerValidation(t *testing.T) {
 
 func TestParseReceivedSET_SkipAudienceValidation(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://issuer.example.com", []string{"https://any-aud.example.com"}, key)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, []string{"https://any-aud.example.com"}, key)
 
 	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
-	config := ReceiverConfig{} // no ExpectedAudiences set
+	// no ExpectedAudiences set — but trust anchor still required (ADR-0066 §D2).
+	config := ReceiverConfig{
+		JWKS: jwksForKey(t, iss, key),
+	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
 	require.NotNil(t, result)
+}
+
+// TestParseReceivedSET_NoJWKS_AlwaysRejected pins ADR-0066 §D2: a push
+// receiver with no configured trust anchor MUST refuse the SET even when
+// RequireSignature is not set. The "None + unverified" combination is
+// unrepresentable at the receiver too — stream-config validation
+// (i2goSignals#235) prevents it at configure time, but the receiver enforces
+// it defensively.
+func TestParseReceivedSET_NoJWKS_AlwaysRejected(t *testing.T) {
+	key := generateTestKey(t)
+	tokenString := createTestSET(t, "https://issuer.example.com", nil, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{} // no JWKS, no RequireSignature
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	assert.Nil(t, result, "no SET may be accepted without a configured trust anchor (ADR-0066 §D2)")
+	require.NotNil(t, deliveryErr)
+	assert.Equal(t, ErrInvalidRequest, deliveryErr.ErrCode)
+	assert.Contains(t, deliveryErr.Description, "no trust anchor")
+}
+
+// jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"
+// goSet.JWS emits when SecurityEventToken.Kid is empty (it falls back to the
+// issuer). This lets a verifying parse resolve the key for a signed SET.
+func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *goSet.JWKS {
+	t.Helper()
+	givenKey := goSet.VerificationKey{Key: &key.PublicKey}
+	return goSet.NewJwksFromKeys(map[string]goSet.VerificationKey{issuer: givenKey})
+}
+
+// --- Signing-only receive posture (#184): RequireSignature ---
+
+// A valid signature with a matching JWKS is accepted under RequireSignature.
+func TestParseReceivedSET_RequireSignature_ValidAccepted(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, iss, aud, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	assert.Nil(t, deliveryErr)
+	require.NotNil(t, result)
+	assert.Equal(t, iss, result.Token.Issuer)
+}
+
+// A SET signed by a key that does not match the issuer's JWKS is rejected with
+// jws_signature_failed (the RFC8935 §2.4 rotate-and-retry signal) — not the
+// generic invalid_request used when signatures are optional.
+func TestParseReceivedSET_RequireSignature_BadSignatureRejected(t *testing.T) {
+	signKey := generateTestKey(t)
+	otherKey := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, iss, aud, signKey)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, iss, otherKey), // wrong public key for this kid
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrJwsSignatureFailed, deliveryErr.ErrCode)
+}
+
+// Under RequireSignature a missing trust anchor (nil JWKS) is a hard reject: the
+// SET must NOT be accepted unverified. This is the core difference from the
+// default posture, where a nil JWKS skips verification.
+func TestParseReceivedSET_RequireSignature_NoJWKSRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, iss, aud, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              nil,
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrJwsSignatureFailed, deliveryErr.ErrCode)
+}
+
+// An issuer mismatch is reported as invalid_issuer (a trust failure, not a
+// signature failure) and is detected before signature verification, so a sender
+// does not pointlessly rotate keys.
+func TestParseReceivedSET_RequireSignature_WrongIssuerRejected(t *testing.T) {
+	key := generateTestKey(t)
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, "https://attacker.example.com", aud, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, "https://attacker.example.com", key),
+		ExpectedIssuer:    "https://issuer.example.com",
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrInvalidIssuer, deliveryErr.ErrCode)
+}
+
+// aud validation still runs (and runs before signature verification) under the
+// signing-only posture.
+func TestParseReceivedSET_RequireSignature_AudMismatchRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, []string{"https://other.example.com"}, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: []string{"https://audience.example.com"},
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrInvalidAudience, deliveryErr.ErrCode)
 }
 
 func TestWriteDeliveryError(t *testing.T) {
@@ -210,12 +365,42 @@ func TestPushSET_Accepted(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.True(t, result.Accepted)
 	assert.Equal(t, http.StatusAccepted, result.StatusCode)
 	assert.NoError(t, result.Err)
+}
+
+// TestPushSET_InsecureSkipVerify pins the tx_tls_skip_verify wiring: a receiver
+// presenting a self-signed TLS cert (httptest.NewTLSServer) is rejected by the
+// default verifying client, but accepted when InsecureSkipVerify is set.
+func TestPushSET_InsecureSkipVerify(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	// Default (verify): the self-signed cert is untrusted, so the push fails at
+	// the TLS layer with no HTTP response.
+	verifyResult := PushSET(context.Background(), "test-token-string", TransmitterConfig{
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+	})
+	require.Error(t, verifyResult.Err, "default client must reject the self-signed receiver cert")
+	assert.False(t, verifyResult.Accepted)
+
+	// InsecureSkipVerify: TLS verification is skipped and the push is accepted.
+	skipResult := PushSET(context.Background(), "test-token-string", TransmitterConfig{
+		AllowPlaintext:     true,
+		EndpointURL:        server.URL,
+		InsecureSkipVerify: true,
+	})
+	assert.NoError(t, skipResult.Err, "InsecureSkipVerify must accept the self-signed receiver cert")
+	assert.True(t, skipResult.Accepted)
+	assert.Equal(t, http.StatusAccepted, skipResult.StatusCode)
 }
 
 func TestPushSET_BadRequest(t *testing.T) {
@@ -231,7 +416,8 @@ func TestPushSET_BadRequest(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.False(t, result.Accepted)
@@ -250,7 +436,8 @@ func TestPushSET_ServerError(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.False(t, result.Accepted)
@@ -266,8 +453,9 @@ func TestPushSET_AuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL:   server.URL,
-		Authorization: "Bearer test-token-123",
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		Authorization:  "Bearer test-token-123",
 	})
 
 	assert.True(t, result.Accepted)
@@ -281,8 +469,9 @@ func TestPushSET_BareTokenPrefixed(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL:   server.URL,
-		Authorization: "raw-token-value",
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		Authorization:  "raw-token-value",
 	})
 
 	assert.True(t, result.Accepted)
@@ -296,7 +485,8 @@ func TestPushSET_NoAuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.True(t, result.Accepted)
@@ -313,7 +503,8 @@ func TestPushSET_BodyContent(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), expectedToken, TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.True(t, result.Accepted)
@@ -321,7 +512,8 @@ func TestPushSET_BodyContent(t *testing.T) {
 
 func TestPushSET_ConnectionError(t *testing.T) {
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL: "http://localhost:1", // port 1 should not be listening
+		AllowPlaintext: true,
+		EndpointURL:    "http://localhost:1", // port 1 should not be listening
 	})
 
 	assert.False(t, result.Accepted)
@@ -337,8 +529,9 @@ func TestPushSET_CustomHTTPClient(t *testing.T) {
 
 	customClient := &http.Client{}
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL: server.URL,
-		HTTPClient:  customClient,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		HTTPClient:     customClient,
 	})
 
 	assert.True(t, result.Accepted)

@@ -2,11 +2,11 @@ package model
 
 import (
 	"fmt"
-	"net/http"
-	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"net/http"
+	"strings"
+	"time"
 )
 
 // RemoteIP holds the network address details of a remote peer on a stream connection.
@@ -76,10 +76,31 @@ type StreamStateRecord struct {
 	Status string `json:"status" bson:"status" json:"status,omitempty"`
 
 	// ValidateJwks is used when in Inbound mode to validate the inbound issuer. This value acts like a cache
-	ValidateJwks *keyfunc.JWKS `json:"-" bson:"-" json:"validateJwks,omitempty"` // not persisted
+	ValidateJwks *goSet.JWKS `json:"-" bson:"-" json:"validateJwks,omitempty"` // not persisted
 
 	// ErrorMsg holds the reason a stream has been paused
 	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty" json:"errorMsg,omitempty"`
+
+	// TransmitterCaused is true when a poll receiver's paused or disabled Status
+	// was reported by the transmitter's status endpoint rather than set by an
+	// operator (issue #310). Only SetTransmitterCausedStatus sets it; every other
+	// status write (SetStatus, and the DAO's UpdateStatus) clears it, so an
+	// operator change always wins. The poll loop resumes a transmitter-caused
+	// pause by itself, and never an administrative one. It is shown on the admin
+	// stream-state surfaces, not on the SSF status response.
+	TransmitterCaused bool `json:"transmitter_caused,omitempty" bson:"transmitter_caused,omitempty"`
+
+	// KeyUnavailableSince marks a key-unavailable pause (issue #312): a paused
+	// Status the server set itself because a signing poll transmitter or SSTP
+	// pair had no active signing key for its iss and signing_alg. It holds the
+	// time of the first failure; a repeat failure does not move it. Only
+	// SetKeyUnavailablePause sets it; every other status write (SetStatus,
+	// SetTransmitterCausedStatus, and the DAO's other status writes) clears it.
+	// The server's background key check resumes a stream only while it is
+	// still set, so an operator's pause is never resumed, and disables a
+	// stream whose key is still missing once the retry limit has passed since
+	// this time.
+	KeyUnavailableSince *time.Time `json:"key_unavailable_since,omitempty" bson:"key_unavailable_since,omitempty"`
 
 	RemoteAddress *RemoteIP `json:"remote_address,omitempty" bson:"remote_address,omitempty"`
 
@@ -94,7 +115,12 @@ type StreamStateRecord struct {
 	// or SubjectFilterModeHybrid.
 	SubjectFilterMode string `json:"subject_filter_mode,omitempty" bson:"subject_filter_mode,omitempty"`
 
-	// EventSource describes where a transmitter stream's events originate.
+	// EventSource describes where a transmitter stream's events originate. It is
+	// the field MatchesStream consults, against this record's inlined
+	// StreamConfiguration, so on a bidirectional SSTP pair record (ADR COM-0018)
+	// it governs the PRIMARY (outbound) leg — the mirror image of EventValidation
+	// below, which is receive-side and governs the inbound leg. The inbound leg's
+	// own descriptor lives on InboundEventSource (issue #296).
 	EventSource *EventSource `json:"event_source,omitempty" bson:"event_source,omitempty"`
 
 	// SubjectRemovalGraceSeconds is the per-transmitter-stream override of the
@@ -104,7 +130,168 @@ type StreamStateRecord struct {
 	// transmitter streams; an override set on a receiver stream is ignored at
 	// CreateStream/UpdateStream with a WARN. No enforcement is wired up in this
 	// slice — it is settable, persisted, and round-trippable.
-	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitempty" bson:"subject_removal_grace_seconds,omitempty"`
+	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitzero" bson:"subject_removal_grace_seconds,omitempty"`
+
+	// RetentionWindowDays is the per-stream event-retention override (ADR 0055,
+	// Q91.1). Like DefaultSubjects it is a goSignals operator knob and is
+	// deliberately kept OFF the SSF wire-format StreamConfiguration — it is NOT
+	// an RFC 8935 StreamConfiguration field. `nil` means inherit the tenancy
+	// default (which itself defaults to keep-forever), so the ack-anchored purge
+	// engine stays dormant until a finite window is set. The effective window is
+	// resolved server-side as stream.RetentionWindowDays ?? bundle default ??
+	// keep-forever. A non-positive value is treated as keep-forever.
+	RetentionWindowDays *int `json:"retention_window_days,omitzero" bson:"retention_window_days,omitempty"`
+
+	// EventValidation is the per-receiver event-validation policy (spec #247
+	// issue #250): NONE, WARN, ENFORCE or STRICT. Like DefaultSubjects and
+	// RetentionWindowDays it is a goSignals operator knob and is deliberately
+	// kept OFF the SSF wire-format StreamConfiguration. An empty value
+	// (EventValidationUnset) means inherit the server-wide
+	// `I2SIG_STREAM_EVENT_VALIDATION` default. The knob is receive-side only: a
+	// mode set on a transmit-only stream is WARN-logged and ignored at
+	// CreateStream/UpdateStream. On a bidirectional SSTP pair record (ADR
+	// COM-0018) this single field governs the INBOUND leg.
+	EventValidation EventValidationMode `json:"event_validation,omitempty" bson:"event_validation,omitempty"`
+
+	// Durability is the per-stream ingest durability mode (spec #111 Stage 3,
+	// issue #343, ADR 0045): DurabilityMajority (default; unset means the same)
+	// or DurabilityLocal. Like RetentionWindowDays it is a goSignals operator
+	// knob kept OFF the SSF wire-format StreamConfiguration. `local` is honoured
+	// only when the deployment runs I2SIG_STORE_WAL=local; otherwise it is
+	// stored and reported but the stream runs at majority. On an SSTP pair the
+	// single field governs the pair's inbound (ingest) leg.
+	Durability DurabilityMode `json:"durability,omitempty" bson:"durability,omitempty"`
+
+	// --- SSTP bidirectional pair fields (PRD #154, ADR 0018) ---
+	// A single StreamStateRecord represents both directions of an SSTP pair on
+	// one node: the embedded StreamConfiguration is the transmit (outbound)
+	// side and SstpInbound is the receive (inbound) side. These fields are unset
+	// (and omitted from JSON/BSON) for RFC8935/RFC8936 records.
+
+	// SstpInbound is the receive-side StreamConfiguration of an SSTP pair. Its
+	// Delivery carries the marker-only SstpReceiveMarker; no per-pair secrets.
+	SstpInbound *StreamConfiguration `json:"sstp_inbound,omitempty" bson:"sstp_inbound,omitempty"`
+
+	// SstpMethod carries pair-scoped connectivity (Role, EndpointUrl,
+	// AuthorizationHeader, PeerPairId). Secrets/endpoints live here, not on the
+	// per-direction Delivery fields, so the SSF wire shape never leaks them.
+	SstpMethod *SstpMethod `json:"sstp_method,omitempty" bson:"sstp_method,omitempty"`
+
+	// PairId is a fresh bson.ObjectID hex minted at create time and IS the
+	// on-wire SSF stream_id for each side of the pair.
+	PairId string `json:"pair_id,omitempty" bson:"pair_id,omitempty"`
+
+	// InboundStatus mirrors Status for the receive (inbound) direction of an
+	// SSTP pair (StreamStateEnabled / StreamStatePause / StreamStateDisable).
+	InboundStatus string `json:"inbound_status,omitempty" bson:"inbound_status,omitempty"`
+
+	// InboundErrorMsg mirrors ErrorMsg for the receive (inbound) direction.
+	InboundErrorMsg string `json:"inbound_error_msg,omitempty" bson:"inbound_error_msg,omitempty"`
+
+	// InboundEventSource is the inbound twin of EventSource, following the
+	// InboundStatus/InboundErrorMsg convention: it carries the receive (inbound)
+	// direction's ADR 0004 routing descriptor, because one record-level field
+	// cannot describe two logical streams (issue #296).
+	//
+	// This node's own router never reads it — MatchesStream decides egress, and
+	// the inbound leg has no egress. It is meaningful because the transmitting
+	// end of that logical stream is the PEER, where mirrorSstpBootstrap delivers
+	// this same descriptor as the peer's primary. So it is the local, readable
+	// record of how the other end was asked to source what it sends here, and the
+	// value the cascade carries. Nil means the leg was configured before #296, or
+	// with no descriptor, and behaves as DIRECT.
+	InboundEventSource *EventSource `json:"inbound_event_source,omitempty" bson:"inbound_event_source,omitempty"`
+
+	// ReceiveMode echoes the SSTP bootstrap's primary.receive_mode (issue #306):
+	// SstpModeImport or SstpModeForward, the choice made for the RECEIVING end of
+	// this pair's outbound direction. That end is the peer, so this node never
+	// routes on it — the peer does, having received it through the mirror. It is
+	// stored so the pair read can show both ends of the direction. Empty when the
+	// bootstrap did not carry it, and then omitted from the wire.
+	ReceiveMode string `json:"receive_mode,omitempty" bson:"receive_mode,omitempty"`
+
+	// InboundReceiveMode is the inbound twin of ReceiveMode, following the
+	// InboundEventSource convention: it echoes inbound.receive_mode, which is
+	// THIS node's receiving choice and is what SstpInbound.RouteMode was built
+	// from. An inbound route_mode patch keeps it in step (updateSstpPair), so the
+	// echo never contradicts the mode it describes. Empty when not bootstrapped.
+	InboundReceiveMode string `json:"inbound_receive_mode,omitempty" bson:"inbound_receive_mode,omitempty"`
+
+	// --- Node-local JWKS readiness (ADR 0033) ---
+	// Derived, never persisted (bson:"-"), and NOT part of the SSF wire-format
+	// StreamConfiguration. Stream Status is not the carrier for this: an
+	// unresolvable stream keeps reporting "enabled", and readiness is what tells
+	// an operator otherwise. Records read from the DAO never carry it — the
+	// admin stream-state surfaces overlay it via
+	// StreamService.OverlayJwksReadiness before serializing.
+
+	// JwksReadiness is this node's readiness to verify inbound SETs on a plain
+	// receiver stream's receive direction.
+	JwksReadiness *JwksReadiness `json:"jwks_readiness,omitempty" bson:"-"`
+
+	// InboundJwksReadiness is the inbound twin of JwksReadiness, mirroring the
+	// InboundStatus/InboundErrorMsg convention: it covers the receive (inbound)
+	// direction of an SSTP pair, whose cache entry is keyed by the inbound SID
+	// (ADR 0018).
+	InboundJwksReadiness *JwksReadiness `json:"inbound_jwks_readiness,omitempty" bson:"-"`
+
+	// EffectiveDurability is the durability this stream's ingest actually runs
+	// at on this node (issue #343): DurabilityLocal only when the deployment
+	// runs I2SIG_STORE_WAL=local AND Durability is local, else
+	// DurabilityMajority. Derived, never persisted; the admin stream-state
+	// surfaces overlay it via StreamService.OverlayEffectiveDurability.
+	EffectiveDurability DurabilityMode `json:"effective_durability,omitempty" bson:"-"`
+}
+
+// JWKS readiness states (ADR 0033). Readiness is node-local and derived: it
+// describes THIS node's current reachability of a receive direction's
+// verification material, not a property of the stream, so two cluster members
+// may legitimately disagree during a partial outage and neither is stale.
+const (
+	// JwksReadinessReady — verification material is resolved and non-empty.
+	JwksReadinessReady = "ready"
+
+	// JwksReadinessUnresolved — an issuer JWKS URL is configured and this node
+	// has not resolved usable keys from it. Carries the last error and, when a
+	// retry is scheduled, the time of the next attempt.
+	JwksReadinessUnresolved = "unresolved"
+
+	// JwksReadinessNotConfigured — no issuer JWKS URL, so nothing is expected on
+	// this direction: it is never unresolved and never retried.
+	JwksReadinessNotConfigured = "not-configured"
+)
+
+// JwksReadiness is the node-local, derived verification-material readiness of a
+// single receive direction. It is excluded from BSON and does not survive a
+// restart.
+type JwksReadiness struct {
+	// State is one of JwksReadinessReady, JwksReadinessUnresolved or
+	// JwksReadinessNotConfigured.
+	State string `json:"state" bson:"-"`
+
+	// LastError is the most recent resolution failure, set only while
+	// unresolved. Empty when this node has not yet attempted a resolution.
+	LastError string `json:"last_error,omitempty" bson:"-"`
+
+	// NextRetryAt is when the next lazy retry becomes eligible. Nil when no
+	// retry is scheduled — a resolved direction, one with no URL, or one whose
+	// last error was permanent (that record is disabled, with the reason
+	// persisted in ErrorMsg).
+	NextRetryAt *time.Time `json:"next_retry_at,omitempty" bson:"-"`
+}
+
+// DeepCopy returns an independent copy of the JwksReadiness, or nil when jr is
+// nil.
+func (jr *JwksReadiness) DeepCopy() *JwksReadiness {
+	if jr == nil {
+		return nil
+	}
+	res := *jr
+	if jr.NextRetryAt != nil {
+		t := *jr.NextRetryAt
+		res.NextRetryAt = &t
+	}
+	return &res
 }
 
 // EventSource describes where a transmitter stream's events originate. This is
@@ -136,6 +323,22 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	res := *ss
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
 	res.EventSource = ss.EventSource.DeepCopy()
+	res.InboundEventSource = ss.InboundEventSource.DeepCopy()
+	if ss.KeyUnavailableSince != nil {
+		since := *ss.KeyUnavailableSince
+		res.KeyUnavailableSince = &since
+	}
+	if ss.RetentionWindowDays != nil {
+		v := *ss.RetentionWindowDays
+		res.RetentionWindowDays = &v
+	}
+	if ss.SstpInbound != nil {
+		inbound := ss.SstpInbound.DeepCopy()
+		res.SstpInbound = &inbound
+	}
+	res.SstpMethod = ss.SstpMethod.DeepCopy()
+	res.JwksReadiness = ss.JwksReadiness.DeepCopy()
+	res.InboundJwksReadiness = ss.InboundJwksReadiness.DeepCopy()
 	return &res
 }
 
@@ -143,6 +346,8 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	// This is being done to preserve the handle on the PushStreams.
 	ss.Status = mod.Status
 	ss.ErrorMsg = mod.ErrorMsg
+	ss.TransmitterCaused = mod.TransmitterCaused
+	ss.KeyUnavailableSince = mod.KeyUnavailableSince
 	// ss.Receiver = mod.Receiver - now handled by StreamConfiguration
 
 	ss.ValidateJwks = mod.ValidateJwks
@@ -155,20 +360,160 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.SubjectFilterMode = mod.SubjectFilterMode
 	ss.EventSource = mod.EventSource
 	ss.SubjectRemovalGraceSeconds = mod.SubjectRemovalGraceSeconds
+	ss.RetentionWindowDays = mod.RetentionWindowDays
+	ss.EventValidation = mod.EventValidation
+	ss.Durability = mod.Durability
+	ss.SstpInbound = mod.SstpInbound
+	ss.SstpMethod = mod.SstpMethod
+	ss.PairId = mod.PairId
+	ss.InboundStatus = mod.InboundStatus
+	ss.InboundErrorMsg = mod.InboundErrorMsg
+	ss.InboundEventSource = mod.InboundEventSource
+	ss.ReceiveMode = mod.ReceiveMode
+	ss.InboundReceiveMode = mod.InboundReceiveMode
+	ss.JwksReadiness = mod.JwksReadiness
+	ss.InboundJwksReadiness = mod.InboundJwksReadiness
 }
 
-// GetType returns the delivery method for the stream state record. Returns one of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll.
+// GetType returns the delivery method for the stream state record. Returns one
+// of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll, or DeliverySstpPair.
+// A record carrying SstpMethod is a bidirectional SSTP pair and reports
+// DeliverySstpPair regardless of which marker its primary Delivery holds.
 func (ss *StreamStateRecord) GetType() string {
+	if ss.SstpMethod != nil {
+		return DeliverySstpPair
+	}
 	return ss.Delivery.GetMethod()
 }
 
 func (ss *StreamStateRecord) IsReceiver() bool {
-	switch ss.GetType() {
+	switch ss.Delivery.GetMethod() {
 	case ReceivePush, ReceivePoll:
 		return true
 	default:
 		return false
 	}
+}
+
+// IsTransmitter reports whether the embedded (primary) Delivery is a
+// transmit-side RFC8935/RFC8936 method.
+func (ss *StreamStateRecord) IsTransmitter() bool {
+	switch ss.Delivery.GetMethod() {
+	case DeliveryPush, DeliveryPoll:
+		return true
+	default:
+		return false
+	}
+}
+
+// HasInbound reports whether the record receives events. An SSTP pair always
+// receives (true); RFC8935/RFC8936 records fall through to IsReceiver().
+func (ss *StreamStateRecord) HasInbound() bool {
+	if ss.GetType() == DeliverySstpPair {
+		return true
+	}
+	return ss.IsReceiver()
+}
+
+// HasOutbound reports whether the record transmits events. An SSTP pair always
+// transmits (true); RFC8935/RFC8936 records fall through to IsTransmitter().
+func (ss *StreamStateRecord) HasOutbound() bool {
+	if ss.GetType() == DeliverySstpPair {
+		return true
+	}
+	return ss.IsTransmitter()
+}
+
+// NamesInbound reports whether sid is the rx-side SID (SstpInbound.Id) of an
+// SSTP pair, which names the inbound half. Every other SID names the primary
+// (outbound) half. DirectionStatus routes status reads by it.
+func (ss *StreamStateRecord) NamesInbound(sid string) bool {
+	return ss.SstpInbound != nil && sid == ss.SstpInbound.Id
+}
+
+// DirectionStatus returns the status and reason of the half sid names:
+// InboundStatus/InboundErrorMsg when NamesInbound, Status/ErrorMsg otherwise. A
+// record that is not a pair has only the primary half, so it always reports
+// Status/ErrorMsg. GET /status reports it (#303). SetStatus keeps a pair's
+// halves equal, so they differ only on a legacy split record, which the next
+// status write heals.
+func (ss *StreamStateRecord) DirectionStatus(sid string) StreamStatus {
+	if ss.NamesInbound(sid) {
+		return StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg}
+	}
+	return StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}
+}
+
+// isPair reports whether the record is an SSTP pair for status purposes. It is
+// EITHER signal — GetType() == DeliverySstpPair (SstpMethod set) or SstpInbound
+// set — because the services layer's SID lookup admits a pair on either and
+// neither implies the other there. Every record created today carries both, but
+// a single-signal test would fail open on a half-formed record: it would leave
+// one half behind on every status write. A plain stream has neither.
+func (ss *StreamStateRecord) isPair() bool {
+	return ss.GetType() == DeliverySstpPair || ss.SstpInbound != nil
+}
+
+// SetStatus writes status and reason onto the record in memory; it does not
+// persist. It always writes Status/ErrorMsg, and on an SSTP pair it also writes
+// InboundStatus/InboundErrorMsg. A pair's two logical streams share one HTTP
+// exchange, so every status — enabled, paused, or disabled — moves both, the
+// same single status a push or poll stream carries (#303), whichever SID named
+// the pair. A one-way logical pause would be a later enhancement.
+//
+// It clears TransmitterCaused: an ordinary status write is not the
+// transmitter's report (#310). It also clears KeyUnavailableSince: it is not a
+// key-unavailable pause (#312).
+func (ss *StreamStateRecord) SetStatus(status, reason string) {
+	ss.Status = status
+	ss.ErrorMsg = reason
+	ss.TransmitterCaused = false
+	ss.KeyUnavailableSince = nil
+	if ss.isPair() {
+		ss.InboundStatus = status
+		ss.InboundErrorMsg = reason
+	}
+}
+
+// SetTransmitterCausedStatus is SetStatus for a paused or disabled status the
+// transmitter's status endpoint reported: it writes the status and reason and
+// sets TransmitterCaused (#310). It does not persist.
+func (ss *StreamStateRecord) SetTransmitterCausedStatus(status, reason string) {
+	ss.SetStatus(status, reason)
+	ss.TransmitterCaused = true
+}
+
+// SetKeyUnavailablePause is SetStatus for a key-unavailable pause (#312): it
+// writes paused and reason and sets KeyUnavailableSince to since, unless the
+// record already carries an earlier marker, so a repeat failure keeps the time
+// of the first. It does not persist.
+func (ss *StreamStateRecord) SetKeyUnavailablePause(reason string, since time.Time) {
+	marker := ss.KeyUnavailableSince
+	ss.SetStatus(StreamStatePause, reason)
+	if marker == nil || since.Before(*marker) {
+		marker = &since
+	}
+	ss.KeyUnavailableSince = marker
+}
+
+// IsStatusChange reports whether SetStatus(status, reason) would change the
+// record, which is POST /status's "no change" test (#303). On a pair both halves
+// take the write, so it is a change when EITHER half differs — which also lets a
+// legacy split record heal; otherwise only the primary half is compared. Reasons
+// compare case-insensitively. A transmitter-caused record always changes, since
+// the write clears TransmitterCaused (#310), and so does a key-unavailable pause,
+// since the write clears KeyUnavailableSince (#312).
+func (ss *StreamStateRecord) IsStatusChange(status, reason string) bool {
+	differs := func(halfStatus, halfReason string) bool {
+		return halfStatus != status || !strings.EqualFold(reason, halfReason)
+	}
+	if ss.TransmitterCaused || ss.KeyUnavailableSince != nil {
+		return true
+	}
+	if ss.isPair() && differs(ss.InboundStatus, ss.InboundErrorMsg) {
+		return true
+	}
+	return differs(ss.Status, ss.ErrorMsg)
 }
 
 func (ss *StreamStateRecord) HasTxServer() bool {
@@ -198,6 +543,22 @@ const (
 	// ReceivePush indicates that a stream receives events using HTTP Set Delivery via PUSH using HTTP POST by the transmitter. It defines an SSF receiver. This is used by goSignals to define the receiver half of a transmitter/receiver pair.
 	ReceivePush = "urn:ietf:rfc:8935:receive"
 
+	// DeliverySstp is the SSF delivery-method URN advertised on
+	// .well-known/ssf-configuration for the Synchronous SET Transfer Protocol
+	// (draft-hunt-secevent-sstp-00). It also identifies the transmit (outbound)
+	// side marker of an SSTP pair's per-direction Delivery field. (PRD #154 Q8.1)
+	DeliverySstp = "urn:i2-open:secevent:delivery:sstp"
+
+	// ReceiveSstp identifies the receive (inbound) side marker of an SSTP pair's
+	// per-direction Delivery field.
+	ReceiveSstp = "urn:i2-open:secevent:delivery:sstp:receive"
+
+	// DeliverySstpPair is the GetType() result for a bidirectional SSTP pair
+	// StreamStateRecord. It is NOT an SSF wire URN — it is the goSignals-internal
+	// type discriminator for the single record that carries both directions of an
+	// SSTP pair. (PRD #154 Q22)
+	DeliverySstpPair = "urn:i2-open:secevent:delivery:sstp:pair"
+
 	StreamStateEnabled  = "enabled"
 	StreamStatePause    = "paused"
 	StreamStateDisable  = "disabled"
@@ -220,3 +581,14 @@ const (
 	EventSourceAudience = "AUDIENCE" // Events routed in by audience matching
 	EventSourceExplicit = "EXPLICIT" // Events sourced from explicitly named stream SID(s)
 )
+
+// AckJti returns the JTI a SET with inboundJti carries on this stream: the
+// inbound JTI for a Forward stream, which sends the SET as received, and the
+// derived copy JTI (goSet.DeriveCopyJti) for every other route mode, which
+// re-signs (an empty route mode re-signs). Only row writers call it (#363).
+func (ss *StreamStateRecord) AckJti(inboundJti string) string {
+	if ss.GetRouteMode() == RouteModeForward {
+		return inboundJti
+	}
+	return goSet.DeriveCopyJti(ss.Id.Hex(), inboundJti)
+}

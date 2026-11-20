@@ -7,7 +7,7 @@ Date: 2026-05-14
 
 ## Status
 
-Accepted
+Accepted. Amended 2026-10-05 by planning spec #112 (community #365): poll transmitters now take a cluster lease, and its holder serves every poll for the stream.
 
 ## Context
 
@@ -51,10 +51,11 @@ The timeouts are **constructor parameters, not package globals or setters** — 
 
 - A disclosed behaviour change: receivers sending `timeoutSecs: 600` are clamped
   to `300s` (documented; `I2SIG_POLL_MAX_TIMEOUT=0` is the opt-out).
-- Poll transmitters do not take cluster leases, so every node reads these vars at
-  its own startup. Inconsistent settings across nodes produce per-node-divergent
-  receiver-visible behaviour (no data loss/duplication); operators are instructed
-  to set both vars uniformly. This is operator hygiene, not a correctness bug.
+- Each node reads these vars at its own startup, and the node holding the
+  poll-transmitter lease serves the poll (planning spec #112, community #365).
+  Inconsistent settings across nodes produce node-dependent receiver-visible
+  timeouts (no data loss or duplication); set both vars uniformly. This is
+  operator hygiene, not a correctness bug.
 
 ## Related
 

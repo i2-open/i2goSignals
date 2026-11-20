@@ -55,7 +55,8 @@ func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWrite
 	}
 
 	// The authorization token may already have a stream ID. If it does, it must match.
-	if authCtx.StreamId != "" && authCtx.StreamId != payload.StreamId {
+	// A stream-bound token may also name only its own bound streams (#303).
+	if !authCtx.BoundTokenPermits(payload.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != payload.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -63,8 +64,9 @@ func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWrite
 	// Existence check up front so we can return a clean 404 rather than a generic 500. The
 	// shared GenerateVerifyEvent helper does its own lookup internally; the duplicate read here
 	// is the cost of mapping "not found" to the correct HTTP status without coupling the helper
-	// to HTTP semantics.
-	stream, err := sa.GetStreamService().GetStream(r.Context(), payload.StreamId)
+	// to HTTP semantics. GetStreamConfigBySID is SSTP-aware: it resolves either direction of an
+	// SSTP pair so a verify against the rx-side SID is not spuriously 404'd (Q40).
+	stream, err := sa.GetStreamService().GetStreamConfigBySID(r.Context(), payload.StreamId)
 	if err != nil || stream == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return

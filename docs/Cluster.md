@@ -12,6 +12,9 @@ The clustering mechanism ensures that specific tasks are owned by a single node 
 The following features are owned by a single node per stream:
 *   **Event Stream Poll Receivers**: Only one node polls an upstream SSF Events endpoint.
 *   **Event Stream Push Transmitters**: Only one node pushes events to a downstream receiver endpoint.
+*   **SSTP Pair Clients (initiators)**: Only one node opens the outbound SSTP connection cycle for a pair.
+*   **Poll Transmitters** (`poll-transmitter:<streamId>`): Only one node holds a poll stream's queue; every node still answers `POST /poll/{id}` (see [Serving non-owner requests](#serving-non-owner-requests-claim)).
+*   **SSTP Pair Servers (acceptors)** (`sstp-server:<txSid>`): Only one node holds an accepting pair's outbound queue; every node still answers `POST /sstp/{id}` and ingests its inbound SETs.
 
 ## Node Identity
 
@@ -39,7 +42,37 @@ Leases are stored in the `cluster_leases` collection in MongoDB.
 ### Atomic Acquisition and Renewal
 Leases are acquired or renewed using an atomic `FindOneAndUpdate` operation:
 *   **Condition**: (lease is expired) OR (lease is owned by current node).
-*   **Update**: Set `ownerNodeId` to current node, extend `leaseUntil`, increment `fencingToken`.
+*   **Update**: Set `ownerNodeId` to current node and extend `leaseUntil`. `fencingToken` is kept when the current owner renews a live lease, and incremented when a new tenure starts (a first acquire, a takeover, or a re-acquire after the lease expired). The token therefore names one tenure of the lease.
+
+### Reading the Owner
+`GetLeaseOwner` reports an expired or released lease as unowned (empty owner, token 0), so a caller never mistakes a lapsed lease for a live one.
+
+### Release on Stop
+Push transmitter and poll receiver runners release their lease (`ReleaseLeaseIfOwned`) when they stop, after their heartbeat has stopped, so another node can take the stream at once instead of waiting out the TTL. The SSTP client releases its pair lease the same way.
+
+### Local WAL: Drain Before Release
+With `I2SIG_STORE_WAL=local` (ADR 0045), a SET is acknowledged once it is in this node's WAL, before it reaches the store. A lease must not pass to another node while such SETs are only on this node's disk. So in local mode the stop order is (#341):
+1.  Ingest closes. A SET arriving now gets 503 + `Retry-After`, and the transmitter resends it, possibly to another node.
+2.  The background drain worker stops between batches, and the WAL is drained to the store synchronously, retrying store failures, for at most `I2SIG_STORE_WAL_DRAIN_TIMEOUT` (default 20s).
+3.  Only then are the delivery runners stopped. Each releases its lease as it exits (above), so the next holder finds every acknowledged SET in the store.
+
+If the drain times out, the node logs the residual depth at ERROR, and the entries stay on disk. Its leases are still released at stop and then expire normally. The residue is replayed when this node starts again. At start, a WAL that holds entries from a previous run is replayed to the store first. Until it is empty, ingest answers 503 + `Retry-After`. In the default `majority` mode, none of this applies and the stop order is unchanged.
+
+### Local WAL: Multi-Node Guard
+A SET acknowledged into one node's WAL is not in the store until the drain moves it. Another node that owns the stream's delivery lease cannot see it until then. Ring-fed delivery (`I2SIG_STORE_WAL_RING_FED=true`, #342) closes that gap on the buffering node. So local mode in a cluster requires ring-fed delivery (#343). The guard has a startup half and a runtime half:
+*   At startup, a node with `I2SIG_STORE_WAL=local` and ring-fed off first registers itself with the cluster coordinator, then asks for the active nodes. If any active node other than itself is registered, it logs an ERROR and refuses to start. The error names the condition and both fixes: set `I2SIG_STORE_WAL_RING_FED=true`, or return to `majority` (unset `I2SIG_STORE_WAL`). Registering before reading means two such nodes started at the same time see each other; at least one refuses, and if both do, the refused entries age out of the active window (60s) and the next start succeeds.
+*   If membership cannot be read, the node also refuses, since it cannot confirm it is alone.
+*   With ring-fed on, both halves are skipped and local mode is allowed in any cluster size.
+*   At runtime, after every 10s heartbeat, a running local-mode node without ring-fed reads the active peers. The first time it finds one, it logs an ERROR naming the peer and both fixes and suspends local ingest on itself: streams with `durability=local` are acknowledged at majority from then on (their effective durability reads `majority`), entries already in the WAL keep draining, and `goSignals_wal_local_ingest_suspended` reads 1. There is no re-arm; the node stays at majority until it restarts, so its durability contract does not flap with membership. A failed membership read is retried on the next heartbeat, not acted on.
+*   So when a second node joins, the joiner refuses to start and the running node steps down to majority. Either way no SET is acknowledged into a WAL another node's delivery cannot see for longer than one heartbeat.
+
+Even in local mode, only streams whose per-stream `durability` is `local` use the WAL. All other streams keep the majority contract.
+
+### Lease-Tenure Acks
+Acknowledgements are not fenced on write. The router's lease manager records, on every acquire or renewal, a tenure deadline of `min(leaseUntil, renewCallStart + leaseDuration) - margin` (margin `I2SIG_LEASE_SAFETY_MARGIN`, default 5s, capped at half the lease duration with a one-time WARN) and answers "does this node still own the stream" from memory:
+*   Inside the tenure, an acknowledgement batch is written with no lease read or coordinator call before it.
+*   Past the tenure, the batch is skipped and nothing is written; the SETs stay pending. A heartbeat renewal resumes it, or the next owner redelivers them, so a takeover can duplicate a send but never lose one.
+*   Every stream kind is checked against its own lease: push and poll transmitters, SSTP pair clients and SSTP pair servers.
 
 ### Parameters
 *   **Lease Duration**: 30 seconds.
@@ -59,6 +92,26 @@ Similarly, for `PUSH` transmitters, the node attempts to acquire the lease `push
 *   Only the lease holder runs the `PushStreamHandler` loop for that stream.
 *   If the lease is lost, the loop stops.
 
+### SSTP Pair Clients
+For the **client (initiator)** side of an SSTP pair, the node attempts to acquire the lease `sstp-client:<PairId>` (note: keyed by the pair's `PairId`, not a per-direction SID).
+*   Only the lease holder runs the SSTP-client connection loop, opening and re-opening the single bidirectional HTTP cycle for that pair.
+*   The lease uses the same 30 s duration / 10 s heartbeat as push/poll. A new owner waits a short randomized takeover jitter before opening its first connection, spreading the thundering-herd after a cluster-wide blip.
+*   If the lease is lost, the heartbeat cancels the cycle context, aborting any in-flight request; another node takes over after the lease expires.
+
+### Poll Transmitters and SSTP Pair Servers
+A poll transmitter is leased as `poll-transmitter:<streamId>` and the accepting (server) side of an SSTP pair as `sstp-server:<txSid>`, with the same 30 s duration / 10 s heartbeat (#365).
+*   The lease is taken on first use, not at startup: when a node routes an event to the stream or answers a request for it and no live lease exists. The new owner builds the stream's queue with one read of the stored pending events.
+*   Only a node whose router serves claims (the server application) takes these leases. A node that does not serve claims routes events to the owner through a wake-up and never builds the queue.
+*   Without a cluster coordinator every stream is the local node's: no lease is taken and no Claim is sent.
+
+### Serving Non-Owner Requests (Claim)
+A `POST /poll/{id}` or `POST /sstp/{id}` that reaches a node which does not own the stream is answered by the owner through one `POST /_cluster/claim` call. The call carries the request's acknowledgements and asks for up to `maxEvents` references; the owner applies the acknowledgements in its one write, claims the references from its queue and returns them, and the receiving node signs and sends them. Only a stream no node knows answers `404`.
+*   The Claim's wait is the receiver's resolved long-poll time (`I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT`) less one second, so the owner answers before the receiver's own deadline; `returnImmediately` sends no wait.
+*   `I2SIG_CLUSTER_CLAIM_INFLIGHT` (default 256) caps the waiting Claims one node holds open to one owner. Past the cap a request is sent with `returnImmediately`, and an empty answer is held on the receiving node for the wait plus one second so a client cannot spin. The budget-exhausted count is `goSignals_router_peer_claim_budget_exhausted_total`; the claims an owner answers are counted in `goSignals_router_peer_claims_total{mode,result}`.
+*   A `NotOwner` answer or a failed call forgets the cached owner and resolves once more; a second failure returns an empty answer with the acknowledgements unapplied, so the client resends them.
+*   An SSTP request that neither acknowledges nor asks for events (`returnEvents=false`) makes no Claim.
+*   The `/_cluster/claim` route uses the wake-up authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer).
+
 ## Intra-Cluster Coordination (Wake-up Mechanism)
 
 To ensure low-latency event delivery without relying on MongoDB Change Streams (which can be resource-intensive and complex to manage), `goSignalsServer` uses a lease-aware wake-up mechanism.
@@ -71,18 +124,71 @@ When a node receives or generates an event that needs to be routed to an outboun
 
 This mechanism is secured using a shared HMAC secret (`I2SIG_CLUSTER_INTERNAL_TOKEN`) and includes rate-limiting to prevent denial-of-service.
 
+Wake-ups are coalesced per target over a 250 ms window, on the sending and on the receiving node, and on **both edges** (#347): the first wake of a burst goes out (or is acted on) at once, and any further wake inside the window arms one trailing wake at the window's end, shared by the rest of the burst. A wake says only "this target has work", so the last wake of a burst is never lost.
+
+On a push stream the owner's wake backfill reads the store past what is already queued or in flight, up to a cap of ten backfill batches per wake. A read that stops at the cap, or a periodic backfill that comes back full, marks a backlog: the loop then reads again each time a batch completes and the buffer runs low, so a burst deeper than the cap drains at delivery speed rather than one batch per backfill interval.
+
+### SSTP wake-up endpoints
+
+SSTP adds two wake-up routes that mirror `/_cluster/wake-transmitter` but are kept separate for telemetry. Both reuse the wake-transmitter authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer) and the same two-edge coalescing window, so duplicate wake-ups inside the window collapse into one trailing wake:
+
+*   **`POST /_cluster/wake-sstp-client`** — the request body's `sid` field carries the pair's **`PairId`**. Broadcast to all cluster nodes when a node receives an inbound event whose target SSTP-client pair is owned (via the `sstp-client:<PairId>` lease) by a different node, so the lease owner drains the pending event into the next outbound cycle.
+*   **`POST /_cluster/wake-sstp-server`** — the request body's `sid` field carries the pair's **tx-side SID**. Sent to the `sstp-server:<txSid>` lease owner, with the new event references, when a node receives an outbound event matching an SSTP-server pair, so a long-poll held open on the owner, or a Claim waiting there for a peer, returns the event immediately.
+
+## Stream-table reconciliation
+
+Each node keeps its own in-memory table of the outbound streams it serves (push transmitters, poll receivers, SSTP pairs). A stream created, updated, re-statused or deleted through one node changes only the shared store, so every node reconciles its table against the store (#349, #350):
+
+*   **Periodic sync** — every 40 seconds the background sync reads every stream from the store, (re)applies each one to the router, and removes every stream the router serves that the store no longer has. This is the fallback that always runs.
+*   **Stream-changed broadcast** — after a stream or SSTP pair is created, updated or deleted, or its status changes, the node that handled the request calls `POST /_cluster/stream-changed` on every other active node with an advertised address. The receiving node reconciles only the stream the call names — it reads that one stream from the store and applies it to the router and the receivers, or removes it if the store no longer has it — and then answers `202`, the acknowledgement the caller waits for. When the stream was removed or is stored as not enabled, the node answers `202` only once its push runner for the stream has stopped, waiting up to 4 seconds and answering `503` if it has not (an SSTP pair's pause is only reconciled; its client runner stops on its own status check). The full store scan and the cluster-row GC stay on the periodic sync, so the call finishes inside the caller's bound however large the store; if the one-stream read fails, nothing changes and the node answers `503`, so the caller retries. The call uses the wake-up authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer, minted with its own `stream-changed` mode so a wake-up token is not accepted here). Repeated calls for one stream that a peer has not yet acknowledged are coalesced into one on the sending node: the peer reads the store's latest state either way, so a create followed at once by a delete is still seen as a delete.
+*   **Waits for the lease holder only** — the request waits only for the node whose runner serves the stream: the unexpired owner of the stream's push-transmitter lease, else of its SSTP-client lease. When that is the handling node itself, it waits (up to 5 seconds, no network call) for its own retired runner to stop. When it is another active node, that node is called synchronously within a 5-second window, and called again a second later while it answers with an error and time remains; each call may take the rest of the window. A holder answers only once its runner has stopped, waiting up to 4 seconds for it, so a holder whose runner is slow to stop usually gets one call. A holder that never acknowledges is logged at WARN and the request returns anyway. When no node holds the stream's lease, nothing is waited for. Every other active peer, and a holder that did not acknowledge, is told in the background by a per-peer notifier: it backs off from 1 second, doubling up to 8 seconds, while calls fail; it drops a stream the peer refuses with a `4xx` other than `408`/`429` (for example a cluster-token mismatch; logged at WARN), drops everything when the peer leaves the active nodes, and gives up on a stream after about 60 seconds (WARN). A peer that is never told catches up on its next periodic sync, within 40 seconds. A status the runner writes itself (a recovery or signing-key pause, its end, a disable) is announced to the other nodes the same background way, with nothing waiting.
+*   **Status changes stop the runner** — a pause, disable or delete applied to a node retires the stream's push runner at once, unless the stored pause is a runner's own (a recovery or signing-key pause, whose stored reason starts `PUSH-SRV: `; the stream-status API refuses an operator reason with that prefix). Every node reads that from the store alike, so standby runners keep waiting for the lease. The runner then exits at its next event or batch boundary without delivering more, leaving the SETs pending and releasing the lease; "done", for the holder's acknowledgement, means that runner has stopped. A runner that takes a stream's lease reads the stream from the store before it pushes, and exits if the store no longer has it or an operator holds it paused or disabled, so a runner started from a stale enabled copy delivers nothing. A stream stored with a runner's own pause is taken over: its last holder has lost the lease (it died mid-recovery, say), so the new runner writes enabled, only while the store still holds that pause, and retries, pausing again if the receiver still fails or the key is still missing. When the runner ends its own pause it re-reads the store and writes enabled only while the stored pause is still its own: an operator's pause or disable stored meanwhile wins, and the runner exits leaving it in place. A re-enable starts a runner wherever the lease lands.
+*   **No store read on the hot path** — a node that routes an event and finds no matching stream does not re-read the store to look for a new one; that would put a store read on every unmatched event. New streams arrive through the broadcast or the periodic sync.
+
+A periodic sync snapshots the streams the router serves **before** it reads the store, so a stream created locally after the snapshot is never removed. If the store read fails, nothing is removed and the cluster-row GC below is skipped.
+
+### Deleted streams
+
+When a reconcile finds that a stream is gone from the store, the router removes it: its runner is told to stop, and each lease it holds (push-transmitter, poll-transmitter, sstp-server, sstp-client) is released when its holder stops, not left to expire; later events write no pending marker for it.
+
+On the deleting node, the stream delete holds the stream-table lock from the receiver teardown through the router's `RemoveStream` to the store's `DeleteStream`, so no reconcile can run between them and re-add the stream. An SSTP pair delete does not take the lock, because `DeleteSstpPair` may make a courtesy call to the peer. A reconcile that runs between its `RemoveStream` and the store delete can re-add the pair for one cycle, and the next reconcile removes it again.
+
+### Orphan pending events
+
+`DeleteStream` removes the stream document only. Pending-event markers already written for the stream stay in the store, but they are inert: nothing reads them once no node serves the stream, and no new marker is written for it. They are not purged.
+
+### Cluster-row GC
+
+After each successful reconcile, a node purges cluster rows left behind by nodes and streams that no longer exist. The GC window is 90 seconds (three lease TTLs):
+
+*   **`cluster_nodes`** — a node row whose `lastSeenAt` is older than the window is deleted.
+*   **`cluster_leases`** — a lease row whose `leaseUntil` is older than the window is deleted **only** when its resource (`push-transmitter:<sid>`, `poll-receiver:<sid>`, `poll-transmitter:<sid>`, `sstp-server:<sid>`, `sstp-client:<PairId>`) names a stream or pair no longer in the store. Lease rows of unknown kinds are kept.
+
+A live stream's lease row is never deleted, however long it has been expired, so its fencing token keeps rising across holders; deleting the row would restart the token at 1 and make the diagnostic history misleading. Acknowledgements do not check the token: ownership before an ack is answered from the node's own lease tenure (LeaseManager). A stream that no longer exists has no holder left, so its row can go.
+
 ## Periodic Backfill
 
 As a fallback and to ensure eventual consistency, transmitter loops periodically perform a "backfill" by polling MongoDB for any pending events that might have been missed by the wake-up mechanism (e.g., due to network transient issues). The backfill interval and batch size are configurable.
+
+An SSTP-client pair loop whose primary long-poll is held by the peer re-checks its outbound work on the same interval (1 second), whether or not a wake was seen, so a wake lost to coalescing or a failed wake call delays those SETs by at most one interval rather than until the long-poll returns (#347).
 
 ## Observability
 
 Nodes register themselves in the `cluster_nodes` collection with metadata:
 *   `_id`: Node ID.
-*   `address`: Host/port.
+*   `address`: The wake-up address peers call (see below).
 *   `version`: Build version.
 *   `startedAt`: Startup timestamp.
 *   `lastSeenAt`: Last heartbeat timestamp.
+
+### Advertised wake-up address
+
+Each node writes the address its peers use for wake-up calls into `address`, at registration and on every heartbeat:
+
+*   `I2SIG_CLUSTER_ADVERTISE_URL`, when set, is stored verbatim (e.g. `http://goSignals1b:8898`).
+*   Otherwise it is derived as `http://<BASE_URL host>:<port>`, where the port is `I2SIG_CLUSTER_INTERNAL_PORT` if set, else the `BASE_URL` port. The scheme is always `http`, so pair a derived address with `I2SIG_CLUSTER_INTERNAL_PORT` (the internal listener serves plain HTTP unless SPIFFE mTLS is on) rather than a TLS main port.
+
+When every node shares one `BASE_URL` (a load-balanced or public name), the derived addresses collide: every node advertises the same address, wake-up calls reach only one node, and cross-node delivery silently falls back to the periodic backfill (SSTP stalls). Give each node its own `I2SIG_CLUSTER_ADVERTISE_URL` (or a per-node `BASE_URL`). A node that finds another live node advertising its own address logs one WARN per peer naming both node ids (`nodeID`, `peerNodeID`).
 
 ## Failure Modes and Handling
 
@@ -99,6 +205,7 @@ To demonstrate clustering in a Docker environment, use the provided cluster conf
 
 In this setup, you can observe that:
 1. Both `goSignals1a` and `goSignals1b` connect to the same MongoDB database (`goSignals1`).
+   Both share `BASE_URL=https://gosignals1:8888/`, so each sets `I2SIG_CLUSTER_INTERNAL_PORT=8898` and its own `I2SIG_CLUSTER_ADVERTISE_URL`; `cluster_nodes` shows `http://goSignals1:8898` and `http://goSignals1b:8898`.
 2. They will compete for leases for any stream defined in that database.
 3. If you stop the container holding a lease, the other node will automatically take over after the lease expires (approx. 30 seconds).
 

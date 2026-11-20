@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -14,16 +15,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	daoInterfaces "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-	"github.com/i2-open/i2goSignals/internal/services"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
@@ -51,12 +51,22 @@ type ssfInstance struct {
 // streamSvc/keySvc/eventSvc/serverSvc are convenience accessors so test code
 // can write `instance.streamSvc().GetStreamState(ctx, id)` without piping
 // through the persistence struct each time.
-func (instance *ssfInstance) streamSvc() *services.StreamService { return instance.persistence.StreamService }
-func (instance *ssfInstance) keySvc() *services.KeyService       { return instance.persistence.KeyService }
-func (instance *ssfInstance) eventSvc() *services.EventService   { return instance.persistence.EventService }
-func (instance *ssfInstance) serverSvc() *services.ServerService { return instance.persistence.ServerService }
-func (instance *ssfInstance) clientSvc() *services.ClientService { return instance.persistence.ClientService }
-func (instance *ssfInstance) tokenSvc() *services.TokenService   { return instance.persistence.TokenService }
+func (instance *ssfInstance) streamSvc() *services.StreamService {
+	return instance.persistence.StreamService
+}
+func (instance *ssfInstance) keySvc() *services.KeyService { return instance.persistence.KeyService }
+func (instance *ssfInstance) eventSvc() *services.EventService {
+	return instance.persistence.EventService
+}
+func (instance *ssfInstance) serverSvc() *services.ServerService {
+	return instance.persistence.ServerService
+}
+func (instance *ssfInstance) clientSvc() *services.ClientService {
+	return instance.persistence.ClientService
+}
+func (instance *ssfInstance) tokenSvc() *services.TokenService {
+	return instance.persistence.TokenService
+}
 
 // The methods below preserve the call shape that test files used to reach
 // through `instance.provider.X` so the per-test diff is mechanical. Each
@@ -69,12 +79,12 @@ func (instance *ssfInstance) Name() string {
 	return ""
 }
 
-func (instance *ssfInstance) GetAuthIssuer() *authUtil.AuthIssuer {
+func (instance *ssfInstance) GetAuthIssuer() *authSupport.AuthIssuer {
 	return instance.keySvc().GetAuthIssuer()
 }
 
-func (instance *ssfInstance) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+func (instance *ssfInstance) CreateStream(request model.StreamConfiguration, authCtx *authSupport.AuthContext) (model.StreamConfiguration, error) {
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 	projectId := ""
 	if authCtx != nil {
 		projectId = authCtx.ProjectId
@@ -99,14 +109,15 @@ func (instance *ssfInstance) DeleteStream(streamId string) error {
 }
 
 func (instance *ssfInstance) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
-	return instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+	refs, more := instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+	return pendingref.RefJtis(refs), more
 }
 
 func (instance *ssfInstance) GetEvent(jti string) *goSet.SecurityEventToken {
 	return instance.eventSvc().GetEvent(context.Background(), jti)
 }
 
-func (instance *ssfInstance) GetEventRecord(jti string) *model.AgEventRecord {
+func (instance *ssfInstance) GetEventRecord(jti string) *model.EventRecord {
 	return instance.eventSvc().GetEventRecord(context.Background(), jti)
 }
 
@@ -115,12 +126,25 @@ func (instance *ssfInstance) ClearPending(streamId string) error {
 	return err
 }
 
-func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
-	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
+func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent, func(inboundJti string) string { return inboundJti })
 }
 
+// GetPrivateKey returns the issuer's signing key as the concrete RSA type the
+// test fixtures need (PEM export, JWKS construction, direct rsa.Sign calls).
+// KeyService hands back a crypto.Signer; this helper is the one place the
+// suite narrows it, so a future non-RSA test key fails here with a clear
+// message instead of at an unrelated assertion.
 func (instance *ssfInstance) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
-	return instance.keySvc().GetPrivateKey(context.Background(), keyName)
+	signer, err := instance.keySvc().GetPrivateKey(context.Background(), keyName)
+	if err != nil {
+		return nil, err
+	}
+	rsaKey, ok := signer.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("signing key for %q is %T, not an RSA key", keyName, signer)
+	}
+	return rsaKey, nil
 }
 
 func (instance *ssfInstance) GetPublicJWKS(keyName string) *json.RawMessage {
@@ -130,7 +154,6 @@ func (instance *ssfInstance) GetPublicJWKS(keyName string) *json.RawMessage {
 func (instance *ssfInstance) ListSummaries() ([]daoInterfaces.KeySummary, error) {
 	return instance.keySvc().ListSummaries(context.Background())
 }
-
 
 func (instance *ssfInstance) GetPollUrl(stream model.StreamConfiguration) string {
 	if stream.Delivery == nil || stream.Delivery.PollTransmitMethod == nil {
@@ -156,12 +179,21 @@ func (instance *ssfInstance) GetPushUrl(stream model.StreamConfiguration) string
 
 func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, error) {
 	t.Helper()
+	return createServerWithHook(t, dbName, resetDb, nil)
+}
+
+// createServerWithHook is createServer with a seam: beforeApp, when non-nil, runs
+// against the opened persistence immediately before the application is built, so
+// a test can substitute a service (e.g. a failing EventDAO) that the router and
+// handlers will then share.
+func createServerWithHook(t *testing.T, dbName string, resetDb bool, beforeApp func(*dbProviders.Persistence)) (*ssfInstance, error) {
+	t.Helper()
 	var err error
 	var instance ssfInstance
 
 	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
-		// MONGO_URL is set by CI (single-node mongo:7); local devs running the
+		// MONGO_URL is set by CI (single-node mongo:8.0.13); local devs running the
 		// docker-compose cluster fall back to TestDbUrl.
 		if u := os.Getenv("MONGO_URL"); u != "" {
 			dbUrl = u
@@ -187,6 +219,10 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 		// The in-memory adapter rebuilds its services on reset; refresh the
 		// cached service references so NewApplication sees the live ones.
 		persistence.Refresh()
+	}
+
+	if beforeApp != nil {
+		beforeApp(persistence)
 	}
 
 	// Build application and wrap with httptest.Server
@@ -216,7 +252,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	}
 
 	clientToken, err := authIssuer.IssueStreamClientToken(model.SsfClient{
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 		ProjectIds:    []string{eat.ProjectId},
 		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 		Email:         "test@test.com",
@@ -227,4 +263,14 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	instance.projectId = eat.ProjectId
 
 	return &instance, nil
+}
+
+// deliveredJti is the jti a receiver of stream sees for inboundJti (#363): a
+// re-signed SET carries the stream's derived acknowledgement JTI, a forwarded
+// SET its inbound JTI.
+func deliveredJti(stream model.StreamConfiguration, inboundJti string) string {
+	if stream.RouteMode == model.RouteModeForward {
+		return inboundJti
+	}
+	return goSet.DeriveCopyJti(stream.Id, inboundJti)
 }

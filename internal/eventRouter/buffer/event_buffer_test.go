@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 
 	"github.com/stretchr/testify/assert"
@@ -344,6 +344,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 
 func TestEventPollBuffer_Wakeup(t *testing.T) {
 	buffer := CreateEventPollBuffer([]string{}, 30, 300)
+	defer buffer.Close()
 
 	start := time.Now()
 

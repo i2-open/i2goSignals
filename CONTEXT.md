@@ -31,7 +31,69 @@ Two independent authorization planes:
   project.
 
 A management session never grants event delivery; a delivery token never
-administers the server. See [`docs/security_model.md`](docs/security_model.md).
+administers the server — with one narrow carve-out: a delivery token may
+read its **own** stream's configuration, which (when it presents the
+stream's current server-issued bearer) doubles as self-service credential
+rotation. See **Rotate-on-GET** below and
+[`docs/security_model.md`](docs/security_model.md).
+
+### Standards-required public SSF surface
+
+The Internet-reachable endpoints required for SSF interoperability: transmitter
+discovery and keys, stream configuration/status/verification/subject management,
+and push, poll, or SSTP event delivery. It excludes operator-only administration,
+bootstrap, cluster-internal, health, metrics, and Swagger surfaces unless a
+deployment deliberately publishes them. Avoid the narrower term “event
+endpoints,” which hides the required stream-control endpoints such as status.
+
+### Rotate-on-GET (bearer rotation)
+
+The SSF behavior where a GET of a stream's configuration returns a
+freshly-minted delivery bearer. The trigger is **proof of possession**:
+rotation fires only when the GET is authenticated by the stream's
+*current server-issued bearer* (the credential about to be replaced).
+The caller is thereby obligated to persist and switch to the new value.
+
+Any *other* authorized read of the same configuration — a management
+session, an admin token, or a valid-but-non-current delivery token —
+receives a **masked** bearer value and triggers no rotation. Admins
+observing config never see (or invalidate) the live credential; the
+live value is surfaced exactly twice in a credential's life: the
+response that created it and the rotation response that retires it.
+
+Rotation applies only to credentials goSignals itself issued
+(inbound-facing bearers); peer-supplied outbound credentials are never
+rotated by a local GET.
+
+Rotation preserves the credential's authorization shape — same scopes,
+same project — but the replacement is **always bound to the stream(s)
+it serves**: a rotated bearer never widens to a wildcard, and a
+presented bearer whose stream binding does not match the stream being
+read never rotates anything.
+
+### Masked credential
+
+How a credential field reads on any surface other than the response
+that minted it: the literal sentinel `***`, with the field present.
+The sentinel is deliberately not omission — an absent credential means
+"none configured", a `***` means "configured, not shown". Writing
+`***` back through an update means **"leave unchanged"**, so a
+read-edit-write round-trip can never clobber a live credential.
+Masking covers every stored credential — server-issued bearers and
+peer-supplied ones alike.
+
+### Rotation grace
+
+The bounded window after a rotation during which the *retired* bearer
+remains valid. It exists for two client-experience reasons: requests
+already in flight with the old bearer are not failed mid-race, and a
+caller whose rotation response was lost can retry its GET with the old
+bearer and receive the **same** current bearer again (idempotent
+re-read — no third credential is minted). When the window expires the
+old bearer is dead cluster-wide. A zero-length grace means immediate
+revocation. Deliberate trade-off: a stolen old bearer can re-read the
+live credential until the window closes — inherent to
+possession-proves-rotation, bounded by the window.
 
 ### `key` scope
 
@@ -63,6 +125,277 @@ issuer's OpenID configuration, then runs OAuth authorization-code + PKCE
 (RFC 7636) via a loopback listener — or RFC 8628 device-code on headless hosts.
 Sessions are stored per-issuer in `credentials.json`; see
 [`docs/cli_login.md`](docs/cli_login.md).
+
+### Local issuer / Foreign issuer
+
+Two classes of SSF issuer, distinguished by whether the issuer's root
+(`scheme://host[:port]`) equals the server's own base URL.
+
+- **Local issuer** — an issuer goSignals itself *publishes* (signs SETs
+  as). Its root is the server base URL, so it is addressed by its **path
+  component**: SSF discovery is served at the §7.2 insert path
+  (`/.well-known/ssf-configuration/<path>`), the discovery `issuer` and
+  the signed `iss` are the full URL, and `jwks_uri` points at a clean
+  `…/jwks/<path>` served by goSignals.
+- **Foreign issuer** — an issuer published by some other entity that
+  goSignals only *relays*. In forward mode a relayed SET keeps the
+  original publisher's `iss`, so the downstream receiver must verify
+  against that publisher's keys — goSignals references the **original
+  publishing entity** verbatim and never serves transmitter discovery on
+  its behalf.
+
+The split exists because SSF §7.2.4 binds `issuer` == fetch-URL == SET
+`iss`, and that binding belongs to whoever actually published the SET.
+See [`docs/adr/0023-local-issuer-addressing.md`](docs/adr/0023-local-issuer-addressing.md).
+
+### SSF stream-create acceptance: strict / flexible / goSignals
+
+Three categories of SSF **transmitter**, from the perspective of a Receiver
+registering a stream (SSF §8.1.1 / §8.1.1.1):
+
+- **Strict-SSF transmitter** — enforces §8.1.1.1: `iss`/`aud`/`issuerJWKSUrl`
+  are Transmitter-Supplied only. The Receiver MUST NOT send them; the
+  transmitter assigns and returns them. The OpenID conformance suite is the
+  canonical example.
+- **Flexible (agnostic) SSF transmitter** — accepts operator-asserted
+  `iss`/`aud` when present, auto-generates them when absent. goSignals itself
+  is flexible, and we expect most real SSF servers to be.
+- **goSignals (cluster) transmitter** — a sister goSignals node
+  (`Server.Type == gosignals`). Always flexible; the operator-asserted
+  `iss`/`aud` carry the cluster-federation routing intent.
+
+There is no reliable discovery signal separating strict from flexible
+(goSignals advertises `spec_version: 1_0` exactly as a strict server would).
+The Receiver therefore **declares** the posture per-server via an operator
+flag (`add server --strict-ssf`, persisted as `StrictSsf`); the default is
+flexible. A strict transmitter that *rejects* an asserted `iss`/`aud` is
+itself the proof of strictness. `StrictSsf` is carried on both the CLI
+`SsfServer` and the shared `model.Server`, so the server-side `TxAlias`
+receiver-create knows the posture of the transmitter it is registering
+against.
+
+### Presence-based acceptance
+
+How goSignals-**as-transmitter** decides whether to honor `iss`/`aud` on an
+inbound stream-create: **if the Receiver supplied them, honor them**
+(cluster-federation / flexible); **if absent, auto-generate.** No mode flag —
+the request body picks the path, so one server serves strict external
+receivers and cluster sisters simultaneously.
+
+### Transmitter-assigned iss/aud
+
+What goSignals auto-generates on the §8.1.1.1 path: `iss` = the server's
+advertised issuer (`GetDefIssuer()`; a per-tenant local issuer once the
+create endpoint becomes issuer-aware), because §8.1.1.1 requires the
+Receiver to confirm `iss` equals the issuer it discovered the Transmitter
+Configuration from — a per-stream issuer would fail that check. `jwks_uri`
+is that issuer's existing JWKS endpoint (ADR 0023). `aud` is a
+freshly-generated, immutable (§8.1.1: "cannot be updated") per-Receiver
+identifier in URI form.
+
+### Route mode
+
+What a stream does with an event on its way through the router. One
+value per stream:
+
+- **Import (IM)** — keep the event locally; do not propagate it.
+- **Forward (FW)** — relay the event *as is*. A signed SET keeps its
+  original signature; an unsigned SET stays unsigned. A forwarding
+  transmitter neither verifies nor signs, so it needs no signing key.
+  Verification, where it happens, belongs to the receive stream that
+  brought the event in. A forwarding transmitter may still advertise an
+  `issuerJWKSUrl` — the original publisher's keys — so the next hop in a
+  multi-hop chain can verify what it receives; goSignals does not check
+  that URL.
+- **Publish (PB)** — re-sign the event under the stream's own `iss` and
+  `signing_alg`. The default for a push transmitter.
+
+A **signing transmitter** is any transmitter not in Forward mode,
+whatever its delivery method; a transmitter with no route mode set
+counts as Publish. An active signing key for its `iss` and
+`signing_alg` must already exist: goSignals never creates a key as a
+side effect of creating or updating a stream, because doing so would
+mask a misconfiguration. A key is created deliberately, before the
+stream that uses it. The check applies to the stream as it would be
+after a create or an update (any update, not only one that changes
+`iss`, `signing_alg` or route mode), and again when the stream is
+re-enabled.
+
+_Avoid_: calling a Forward stream "unsigned" — it may carry a signed SET
+untouched.
+
+### Re-sign (PB) routing and identity rules
+
+How `RouteMode` and the `EventSource` selector interact at the matcher
+(`EventService.MatchesStream`), which today filters only on
+`(iss, aud, event-type)` and must be extended to honor both axes:
+
+- **The routing selector is `EventSource`** — not `RemoteStreamId`, which is
+  the *protocol pairing pointer* connecting stream halves for delete-cascade.
+  `EXPLICIT` selects by `event.Sid ∈ SourceStreamIds`; `DIRECT` (which is
+  also where unset resolves, issue #199) keeps the full `iss`/`aud`/event-type
+  filter; `AUDIENCE` drops the `aud` filter, the stream's own `aud` being a
+  routing handle. See **Event source** below.
+- **`iss` is a selection constraint only in Forward mode.** A forwarded SET
+  is relayed as is (its original signature, if any, untouched), so its `iss`
+  must match what the downstream validates against. In **Publish mode goSignals re-signs under its own
+  `iss`**, so the inbound `iss` is irrelevant to selection — the matcher must
+  *not* require it. A strict transmitter is therefore **PB + EXPLICIT**,
+  selecting purely on source SID + event-type.
+- **`jti` is preserved across the PB re-sign** — goSignals re-signs the
+  stored token, changing `iss`/`aud`/`iat`/`kid` but not `jti`. This keeps
+  ADR 0017's jti-only dedup and SSTP crash-recovery idempotency intact across
+  the hop. `txn` (RFC 8417 §2.2) is the cross-hop audit linkage and is
+  likewise preserved; never `act` (an access-token claim, not a SET claim).
+  Since planning #112 the re-signed copy stored in `events` gets a new
+  `jti` and carries `originalJti` — see **`originalJti`** below.
+
+### SET signing algorithm (`signing_alg`)
+
+Which JWS algorithm a stream's SETs are signed with, chosen per stream
+rather than per server (ADR 0034, RFC 9964). A pinned value — `RS256`
+(RSA-2048), `ES256` (ECDSA P-256) or `ML-DSA-65` (post-quantum) — signs
+with the issuer's newest active key of that type. `""` (unset) means
+**any key type**: the stream signs with the issuer's newest active key,
+and the JWS `alg` follows that key's type (spec #114). An issuer that
+only ever had its legacy RSA key therefore signs exactly as before; one
+that gains a newer ES256 key moves its unset streams to ES256, while the
+RSA key stays in the JWKS so SETs signed earlier still verify.
+
+New keys minted without an explicit algorithm take the type
+`I2SIG_KEY_ALG` names (default `ES256`; `RS256` and `ML-DSA-65` also
+accepted). The auth-token key is always RSA. Every minting
+`POST /key/{name}` response carries a `Key-Id` header naming the new
+kid, and a key summary's `keyStates[]` report each key's `alg`
+(`RS256` for a stored `""`), oldest-first.
+
+Each opt-in trades differently, which is why the choice is per stream:
+
+- **`ES256`** buys transmitter throughput. Signing runs once per event
+  per outbound stream, and RSA-2048 signing measured ~0.822 ms against
+  P-256's ~0.019 ms on the same host — enough to make RSA the single
+  largest consumer of transmitter CPU and the dominant source of
+  allocation churn. Verification moves the other way (ES256 verify is
+  slightly dearer than RS256), so the receiver pays a little of what the
+  transmitter saves a lot of.
+- **`ML-DSA-65`** buys post-quantum resistance and costs wire size: its
+  signature is 3309 bytes against RS256's 256.
+
+The vocabulary that hangs off it:
+
+- **AKP** — the RFC 9964 JWK key type for a post-quantum key pair
+  (`kty:"AKP"`), whose parameter set lives in `alg` rather than in
+  `kty`. `pkg/goSet/mldsa` owns the codec and the `jwt.SigningMethod`,
+  because golang-jwt/keyfunc/jwkset have none.
+- **Dual-key JWKS** — an issuer with any ES256 or ML-DSA stream
+  publishes its RSA key *and* the opted-in key, under distinct kids. A
+  receiver that has never heard of AKP skips it and keeps verifying its
+  RS256 stream unchanged; that is what makes the opt-in per-stream
+  rather than a flag day. `JwkKeyRec.Alg` is the store's discriminator
+  and its encoding contract: `""` RSA/PKCS#1, `ES256` SEC 1 + PKIX,
+  `ML-DSA-65` raw seed + public bytes.
+- **`GetSigner(ctx, issuer, alg)`** — the transmitter's key-acquisition
+  seam. A pinned alg selects **by algorithm, then recency**: the newest
+  active key of that type, never a newer key of another type (which
+  RS256 could not use). An empty alg selects the newest active key of
+  any type, and `services.StreamSigningMethod` takes the JWS method from
+  that key. The router caches per `(issuer, alg)`; invalidation stays
+  issuer-level and evicts every entry.
+- **`goSet.AllowedAlgs()`** — `{RS256, ES256, ML-DSA-65}` on every node
+  whether or not it transmits ML-DSA. The allow-list gates the token
+  header before key lookup, and a receiver must be able to verify a
+  PQ-signed SET from a peer regardless of what it signs itself. It is
+  now exactly the set `goSet.SigningMethodFor` will select, because the
+  key store can hold a key for each.
+
+Independent of all of the above: `CERT_KEY_ALG` selects the key
+algorithm for the **internal mTLS** certificates `cmd/genTlsKeys`
+generates. Different trust root, different blast radius, its own
+off-by-default switch.
+
+### Key rotation / Absolute revoke
+
+How a signing key is retired, as the signing transmitters that use it
+see it.
+
+- **Rotation** — a replacement key for the same issuer and `signing_alg`
+  is active *before* the old key is suspended or revoked. Signing
+  transmitters move to the replacement and keep delivering. This is the
+  expected way to suspend or revoke a key.
+- **Absolute revoke** — a key is revoked with no replacement in place.
+  Every signing transmitter that signs with it stops (pauses, then
+  disables) until a new key is configured. A revoke is never blocked or
+  held for confirmation: it is the response to a leaked key.
+
+A suspend or replace that would leave a signing transmitter with no
+active key needs the operator's explicit confirmation; a revoke never
+does.
+
+A signing key is created only by an operator, one algorithm at a time —
+never as a side effect of creating or updating a stream. Rotate and
+replace act on one algorithm and leave the issuer's keys of other
+algorithms alone.
+
+Every node stops signing with a suspended, revoked or replaced key, and
+picks up a rotated one, within a few seconds of the change, whichever
+node handled it.
+
+The bound is the router's **key cache**
+(`internal/eventRouter/signing_key_cache.go`): each node's in-memory
+signing keys, per issuer and algorithm, which every signing transmitter
+on the node shares. An entry is re-read from the key store 2 s after it
+was loaded, once per issuer and algorithm however many streams use it;
+the node that handles a key change clears the issuer's entries at once.
+A re-read that finds no active key drops the entry, so the transmitter
+follows the missing-key rule; a re-read that fails keeps the current key,
+so a key store outage does not pause every signing transmitter.
+
+**Key validity period** (ADR 0042): a signing key may carry `NotBefore` /
+`NotAfter` — its certificate's dates, or creation plus a lifetime
+(`I2SIG_ISSUER_KEY_LIFETIME`, default 180 days). Outside that period the key
+is `expired` or `not-yet-valid`: it stays in the JWKS but never signs, and a
+stream left without a valid key follows the missing-key rule. A key without
+a period never expires. Validity is derived on read, never stored as status;
+a key otherwise leaves service by suspend, revoke or replace.
+
+### Stream status: paused / disabled
+
+Pause and disable are defined at the **transmitter**:
+
+- **Paused** — the transmitter keeps queuing the stream's events for
+  later delivery.
+- **Disabled** — the transmitter does not queue events for the stream.
+
+A signing transmitter that has no active signing key takes a
+**key-unavailable pause**: it keeps queuing, resumes by itself once the
+key is active again, and disables if the key is still unavailable after
+the retry limit. It resumes only its own key-unavailable pause, never an
+operator's.
+
+A receiver's own status reports **paused** whenever it has stopped
+polling, for one of two reasons:
+
+- **Transmitter pause** — the receiver discovered from the transmitter's
+  status endpoint (typically when polling stops succeeding) that the
+  transmitter paused the stream. The receiver stops polling and
+  retrying, and resumes by itself once the status endpoint reports
+  enabled again.
+- **Administrative pause** — an operator paused the receiver. It stops
+  polling and every retry, and only an operator re-enable resumes it.
+  The receiver may tell the transmitter, but is not obliged to.
+
+A transmitter disable, or an operator disable, stops the receiver until
+an operator re-enables it.
+
+A receiver's paused or disabled status is **transmitter-caused** when
+the transmitter's status endpoint reported it, as opposed to an operator
+setting it. The receiver records which, so an operator can tell the two
+apart; any operator status change clears it.
+
+A receiver that is only retrying (for example after connection errors)
+has not paused: its status stays enabled and the reason says why.
+
+_Avoid_: "paused" for a receiver that is only retrying.
 
 ### Persistence record
 
@@ -137,6 +470,178 @@ wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
 
+### DeliveryQueue
+
+The per-stream module the `EventRouter` owns for one target stream's
+in-memory work: the pending JTIs still to deliver, the in-memory poll
+claims, and the coalesced acknowledgement batch. The acknowledgement
+batch is one Mongo write — a conditional update of the stream's
+`deliveries` documents from `pending` to `delivered`, plus w:1 inserts of
+the re-signed outbound copies into `events`. It replaced the old
+pendingEvents `DeleteMany` + deliveredEvents `InsertOne` + retract
+`DeleteMany` sequence.
+
+### RoutingTable
+
+An immutable snapshot of stream routing — stream id, status, delivery
+mode, event-type and subject filters — rebuilt whenever a stream is
+added, removed or changes status, and read without taking the router
+lock. Lease ownership is deliberately not part of it; that stays in the
+**lease-owner cache** (see **Ingest read caches**).
+
+### PeerTransport
+
+The seam for inter-node wake signalling. One method:
+`Wake(ctx, owner node, WakeMessage{StreamID, Mode, Reason, JTIs})`. The
+production adapter is HTTP (HMAC-signed, its own routes, node address
+looked up in Mongo); the two-node test harness uses an in-process
+adapter. The JTI list is advisory and capped — the receiving node falls
+back to reading its pending `deliveries` from Mongo.
+
+### LeaseManager
+
+The node-level module that owns lease acquire / heartbeat / release for
+every stream on a node. It keeps the lease expiry each heartbeat returns
+and answers "do I still hold stream X" from local tenure minus a safety
+margin, so no Mongo read precedes an acknowledgement batch. Fencing
+tokens remain for operator-visible diagnostics; fence-on-write was
+rejected (no transactions, and delivery documents carry no owner).
+
+### One-trip ingest write
+
+Ingest stores a batch's event bodies **and** every matching stream's pending
+markers in ONE store call, `EventDAO.InsertWithPending` (ADR 0043). On MongoDB
+8.0+ it is a single ordered multi-namespace client `bulkWrite`, so ingest pays
+one majority-acked round trip; below 8.0 it falls back to two sequential writes
+(bodies, then markers for the accepted bodies only) and logs one WARN at
+startup. Either way a marker is written only for a SET whose body was stored, so
+there is no speculative marker to retract.
+
+The router's ingest path plans first and writes once: `planFanoutLocked` selects
+the matching streams (no write), `EventService.AddEventsWithPending` stores
+bodies and markers, and `commitFanoutLocked` meters the accepted SETs as egress
+and only then wakes the streams. A SET is acked only when its body and its
+markers are durable (ADR 0038's contract, retained).
+
+Worth knowing before debugging a delivery oddity: a **body-less marker** can
+still exist — data left by an older build's concurrent ingest — and every
+delivery leg skips one without acking it. A crash between the fallback path's
+two writes leaves the opposite: a stored body with no marker, never acked.
+And if a body lands but one of its markers fails, the SET is answered 503; the
+retry resolves as a duplicate, and `router.requeueDuplicates` repairs it
+through `EventService.RequeueDuplicate` / `EventDAO.EnsurePending`, an
+idempotent `(sid, jti)` upsert that queues the SET on each target holding
+neither a pending nor a delivered record for it, then meters and wakes those
+targets like an accepted SET (#331). A duplicate with its markers in place
+changes nothing; a failed repair is answered 503 again. The WAL drain runs the
+same repair. The only residual is a retry that arrives after retention purged
+the delivered record, which is re-queued (at-least-once).
+
+The pending-marker and delivered-record collections (pendingEvents /
+deliveredEvents) were replaced by the single `deliveries` collection under
+planning #112 — see below. Legacy documents are migrated once at startup.
+
+### `deliveries` collection
+
+Replaces the pendingEvents and deliveredEvents collections with one
+document per `(sid, jti)`:
+`{sid, jti, ackJti, state: pending|delivered, createdAt, ackDate, expireAt}`
+— a reference only, never the body. `ackJti` is the row's
+**Acknowledgement JTI** (see below). Indexes: unique `(sid, jti)`;
+`(sid, ackJti)` for the acknowledgement match; `(sid, state, jti)` for the
+pending read; TTL on `expireAt`; `jti` for the body sweep; and a partial
+`(sid, createdAt)` index over `state: pending` rows only, for the
+backlog's oldest enqueue time. `state` is open to a later `claimed` value. Because a
+delivery document is a reference, a body in `events` is purged only when
+no delivery document in either state references it. `expireAt` is
+written at acknowledgement from the stream's retention policy (enterprise
+policy may vary it per stream).
+
+### Acknowledgement JTI (`AckJti`)
+
+The JTI a receiver acknowledges a delivered SET by, stored on the
+`deliveries` row as `ackJti` when the row is written. For a Forward
+stream it is the inbound JTI; for a re-signing route mode it is the JTI
+of the re-signed outbound copy. An acknowledgement is matched against
+`ackJti`, never re-derived from the stream's current route mode, so a
+route-mode change does not orphan rows already written (#363).
+
+### Claim
+
+Two related meanings, both owned by the stream's lease owner:
+
+- **Poll claim** — a short in-memory hold the owner's **DeliveryQueue**
+  takes on the JTIs it hands to one RFC 8936 poll or SSTP-acceptor
+  request (`I2SIG_POLL_CLAIM_TTL`), so overlapping requests get disjoint
+  batches. An ack or release frees it; an expired claim makes its JTIs
+  servable again (at-least-once). A restart or lease takeover drops all
+  claims.
+- **Claim call** — `PeerTransport.Claim`: a node that receives a poll or
+  SSTP request for a stream it does not own forwards it to the lease
+  owner, which answers from its queue. The non-owner writes nothing and
+  builds no queue (#365).
+
+### ServesClaims
+
+`RouterDeps.ServesClaims`: true when the process serves poll and
+accepted-SSTP requests and mounts `/_cluster/claim` (the community
+server and goSsfServer). A router with it false (business routers) never
+takes a poll-transmitter or sstp-server lease; it wakes a known owner at
+ingest and otherwise leaves the rows pending (#365).
+
+### Enqueue time / Queue time / Acknowledgement time / Backlog (#352)
+
+The transmitter-side waiting vocabulary, per target stream:
+
+- **Enqueue time** — when the stream's delivery record for a SET was
+  created (or re-created by a re-queue or a stream reset). Distinct from
+  **receipt time**, when the server first accepted the SET: a replayed SET
+  has an old receipt time and a fresh enqueue time.
+- **Queue time** — enqueue time to the SET's *first* hand-out to the
+  receiver (push request sent, poll response written, SSTP frame sent).
+  The transmitter's own wait.
+- **Acknowledgement time** — first hand-out to acknowledgement. The
+  receiver's processing plus transport; retries and redeliveries count
+  here, not against queue time.
+- **Backlog** — the stream's pending events queue: every SET enqueued and
+  not yet acknowledged, whether or not it has been handed out. Reported as
+  a depth and as the age of the oldest.
+
+### `originalJti` (field on `events`)
+
+Set on a re-signed outbound copy stored in `events`: the copy carries a
+new `jti`, and `originalJti` points at the inbound SET it was derived
+from. Ingest dedup is on the inbound `jti` only (amends ADR 0017,
+follow-up pending). Ordering (ADR 0040) sorts on the original `jti`.
+
+### Ingest read caches
+
+Three separate caches serve the per-event reads on the ingest path, each scoped
+to its own staleness tolerance rather than sharing one TTL (ADR 0039). Reach for
+the right one by what it answers, not by name:
+
+- **Request-scoped stream memo** (`pkg/services/stream_request_cache.go`) —
+  "which stream is this?", memoised for the life of one request. No expiry, since
+  it cannot outlive the handler. It is a **correctness surface**: every
+  `StreamService` write calls `invalidateRequestStreams`, and any new write path
+  that reaches the DAO directly owes it the same. Opt-in — a context with no memo
+  installed is byte-for-byte the old read path.
+- **Token revocation cache** (`pkg/services/token_revocation_cache.go`) — "is
+  this bearer revoked?", 2 s TTL. Bounds exactly one case: a *peer* node revoking
+  a token this node recently validated. A local revoke drops the entry as part of
+  the revoke, and an entry is capped at the token's own `revoked_at`, so the
+  rotate-on-GET grace window (ADR 0022 §2) stays exact rather than approximate. It
+  carries an invalidation **generation** so a revoke landing during an in-flight
+  read cannot be straddled; `putIfCurrent` is the only writer, and callers sample
+  the generation BEFORE the store read they intend to cache.
+- **Lease-owner cache** (`internal/eventRouter/lease_owner_cache.go`) — "who owns
+  this push-transmitter, poll-transmitter or sstp-server lease?", 2 s TTL. A
+  backstop behind this node's own acquire / renew / lose / exit transitions,
+  which keep it honest. It steers a wake-up or a Claim and **never authorises a
+  delivery**; a Claim answered `NotOwner` forgets the entry (#365). The SSTP-client lease is
+  deliberately not cached: it is owned by the dialer in `internal/server`, so a
+  cache here would be a bare TTL with no invalidation hook.
+
 ### EventService.MatchesStream
 
 `(*EventService).MatchesStream(stream, event) bool` — the SET-to-stream
@@ -168,10 +673,7 @@ the structural fix that keeps the two adapters in lockstep.
 ### Fencing token
 
 Monotonically increasing per-resource counter handed back from
-`TryAcquireOrRenewLease`. Callers tag externally-visible operations
-(e.g. ack-event, push-receipt) with the fencing token so a stale node
-that lost its lease can be rejected at the boundary even if it's still
-trying to write. The `MemoryCoordinator`'s contract guarantees the
+`TryAcquireOrRenewLease`. The `MemoryCoordinator`'s contract guarantees the
 token never moves backward across the lifetime of a coordinator
 instance, even after takeover.
 
@@ -299,14 +801,19 @@ discovery metadata, and (b) an unambiguous relay target — see
 ### Event source
 
 How a transmitter stream selects the events it sends. A new axis,
-distinct from `RouteMode` (IM/FW/PB):
+distinct from `RouteMode` (IM/FW/PB). An unset source resolves to
+**Direct** (issue #199), the branch that keeps the historical filter
+— not to Audience-routed, which drops half of it:
 
-- **Direct** — no routed source; events arrive in Mongo by other
-  means (e.g. direct POST). Relay is impossible → `LOCAL` only.
-- **Audience-routed** — events matched in by `iss`/`aud`/event-type
-  (the current behavior). For relay, the feeding receiver stream is
-  found by matching the transmitter stream's `iss` to a receiver
-  stream's `iss`.
+- **Direct** — the operator's declaration that there is no routed
+  SSF source; events arrive in Mongo by other means (e.g. direct
+  POST), so relay is impossible → `LOCAL` only. At the matcher this
+  is the branch applying the full `iss`/`aud`/event-type filter.
+- **Audience-routed** — the stream's own `aud` is a routing handle
+  rather than a value the event must carry, so the matcher **drops**
+  the `aud` filter and keeps `iss` and event type. For relay, the
+  feeding receiver stream is found by matching the transmitter
+  stream's `iss` to a receiver stream's `iss`.
 - **Explicit (SID) source** — the transmitter stream names the
   specific source stream SID(s) it forwards/republishes from.
 
@@ -419,9 +926,33 @@ downstream by quietly removing a victim Subject.
 ## Package boundaries
 
 The server handler tree (`application.go`, `routers.go`, `api_*.go`, and
-their tests) lives in `internal/server`. `pkg/goSignals/` retains only
-genuinely library-shaped contents: the OpenAPI client (`api/`), the
-swagger UI assets (`swagger-ui/`, `swagger.go`), and the `Dockerfile`.
+their tests) lives in `internal/server`. The former `pkg/goSignals/` package
+(embedded Swagger UI served at `/swagger/`, plus codegen scaffolding) was
+removed in v0.12.0-alpha.21; neither server mounts a Swagger UI any more.
+
+**`pkg/goSignalsServer` (product export) vs `pkg/goSsfServer` (spec server).**
+`goSignals` — served by `cmd/goSignalsServer` over `internal/server.SignalsApplication` —
+is the primary product: a strategic gateway that is a *superset* of SSF (receivers,
+cross-protocol SET routing, MongoDB-lease clustering, subject filtering, admin CRUD).
+`pkg/goSignalsServer` is that product's pkg-importable *export surface* for out-of-tree
+consumers (the enterprise REST-coexistence binary — #215, ADR 0027); today it exports
+only the admin handler set (`NewAdminSurface`/`AdminRoutes()`) with a stub event router —
+the peer/event plane is served by the binary directly. `pkg/goSsfServer` is a *separate*,
+minimal, SSF-spec-only server for inter-op testing and event generation that deliberately
+omits the product's extended functionality (e.g. receivers). **Caution:** `pkg/goSignalsServer`'s admin
+export carries only a *stub* event router (`adminRouterAdapter` panics on every
+event method) — it cannot host an event-plane seam; a live `EventRouter` exists
+only on the in-binary gateway and the `goSsfServer` test server. The Slice-15
+metering event-observer (#217) was therefore closed not-planned: its
+`AdminSurfaceConfig.EventObserver` rides that stub router and observes nothing.
+Where the community *does* meter is the live `EventRouter`, **transport-agnostically**:
+`IncrementCounter` tags every business SET — push, poll, and SSTP alike, the
+transport carried only as a `tfr` label — into the `events_in_total` /
+`events_out_total` Prometheus counters and exposes them at `/metrics`
+(`internal/server/prometheus.go:363`, `routers.go:76`). Event-throughput metering
+is therefore a *scrape of that existing surface*, not a new hook; the one piece it
+cannot supply is distinct-subject MAS, which is not a counter and needs per-event
+subject visibility wherever subjects are seen.
 
 Known debt: `pkg/goSsfServer/ssf-application.go` (a demo receiver)
 imports `internal/server`, crossing the `pkg/` → `internal/` boundary.
@@ -509,6 +1040,113 @@ connected from — already tracked per stream as `RemoteIP` on
 write on the hot path). The management-plane token table *joins* this
 onto stream-typed tokens. This is the stream-token analogue of an IAT's
 Last-redemption IP. Undefined for IATs (they are not bound to a stream).
+
+## Event validation vocabulary
+
+### Event validation mode
+
+A setting on a goSignals **receiver stream** controlling whether the
+*semantics* of SET event payloads (required claims, subject shape) are
+checked after the SET itself passes signature/`iss`/`aud` verification.
+Validation is per event URI: an event is **recognized** when a
+validator for its URI is registered, **unsupported** otherwise.
+
+- **`NONE`** (default) — no payload checks; valid signature → forward.
+  Today's content-agnostic router posture, unchanged.
+- **`WARN`** — checks run for observability only: a recognized but
+  malformed payload is logged at WARN and still forwarded; unsupported
+  URIs forward silently. The staged-rollout mode.
+- **`ENFORCE`** — recognized-but-malformed events are rejected on the
+  wire (each transport maps the rejection to its own RFC semantics);
+  unsupported URIs still forward. "What I recognize must be
+  well-formed."
+- **`STRICT`** — firewall posture: every event must be vouched for by
+  a validator. Malformed *and* unsupported events are both rejected.
+
+An event is also treated as unsupported when its URI is
+**out-of-contract** — matching none of the stream's negotiated
+`events_delivered` patterns. Which event *types* flow on a stream
+remains the job of `events_requested` ∩ `events_supported`;
+validation mode governs payload well-formedness, not type selection.
+
+The `events_supported` half of that intersection is the **catalog**:
+the compiled-in SCIM/CAEP/RISC/WISE packs, plus any URIs an operator
+adds through `I2SIG_EVENT_TYPES_EXTRA` (ADR 0032). It is a routing
+gate, not an advertisement — a type outside it negotiates into an
+empty `events_delivered` and its SETs are stored but never routed.
+An extended URI has no built-in validator, so it is *unsupported* by
+the definition above: forwarded under every mode but `STRICT`.
+
+Rejection granularity is the whole SET (worst disposition wins): the
+router forwards raw signed tokens and never strips a payload, so under
+`STRICT` a SET carrying an unrecognized extension payload alongside a
+valid event is rejected whole.
+
+### Event validation wire mapping
+
+Where a rejected SET surfaces on each receive transport. The
+`pkg/goSet*` receiver libraries never reject: they compute
+dispositions and report them (`goSetPush.ReceivedSET.Validation`,
+`goSetPoll.ParsedPollResponse.Validations`). Mode policy and the
+mapping below live in `internal/server` — the libraries stay
+policy-free, and "dispositions reach the server wiring" is structural
+rather than a review checkpoint.
+
+Both transports report the same error code, `invalid_request`: RFC8935
+§2.4 defines it for a non-conformant event payload and RFC8936 §7.1.2
+shares that registry. The description names the offending event URI
+and, for a malformed payload, the failing claim.
+
+- **Push** — HTTP 400 with the RFC8935 error body. The SET is not
+  routed and never reaches the `EventRouter`.
+- **Poll** — the jti goes into the next poll's `setErrs` instead of
+  `ack`. Other jtis in the same batch ack normally: the decision is
+  per-jti, because the jti is the ack granularity.
+- **SSTP** — the jti goes into the message's `setErrs` on BOTH server
+  paths: the acceptor puts it in the response it is already writing,
+  and the dialer's inbound half carries it in its next request
+  alongside the acks. A pair is one bidirectional
+  `StreamStateRecord` (ADR COM-0018), so its single
+  `event_validation` field governs the **inbound** leg on both paths,
+  and engagement comes from that leg's `events_delivered` — never the
+  transmit leg's. `goSetSstp.VerifyConfig.Validators` /
+  `VerifiedSET.Validation` are the additive hook, added without moving
+  `VerifySET`'s signature because the package has live out-of-tree
+  consumers.
+- **`WARN`** is wire-invisible — normal 202 / normal ack, plus a WARN
+  log carrying jti, event URI and the failed check. Unsupported logs
+  at DEBUG, since any event type no validator pack covers yet is
+  unsupported and would otherwise be pure noise.
+
+Validator **engagement** is derived from the stream's negotiated
+`events_delivered`, expanded through `ssfModels.MatchDeliveredEvents`
+so exactly one pattern→URI surface exists. `NONE` builds no validator
+set at all, so the default posture is the pre-validation receive path
+rather than "validate and discard the answer".
+
+Observability is one counter, `goSignals_router_event_validation_total`,
+labeled disposition × mode × transport. It is not labeled by stream or
+event URI, either of which would make the series unbounded. `NONE`
+records nothing, because it computes nothing.
+
+### SSF stream-management events
+
+The two event types the SSF spec itself defines, both diagnostic /
+operational rather than business signals: the **Verification Event**
+(SSF §8.1.4.1, the receiver-triggered stream liveness check) and the
+**Stream Updated Event** (§8.1.5). They are always in-contract and
+always validated regardless of a stream's `events_delivered` list, so
+a narrowly-scoped `STRICT` receiver never rejects its own verification
+handshake. Distinct from the enterprise product's control-stream
+events, which are not community vocabulary.
+
+**Ping event** (ADR 0048, planning#142): A Verification Event, whoever sent it: a keepalive or
+operator-triggered verify that goSignals transmits, or one it receives
+from a peer SSF server. It is a diagnostic event, not a data event; it
+is kept only for short-term diagnosis, unlike data events, which follow
+their stream's retention.
+_Avoid_: heartbeat, keepalive event (a keepalive is one source of ping
+events, not the whole set), verify SET
 
 ## Adding a new persistence method
 

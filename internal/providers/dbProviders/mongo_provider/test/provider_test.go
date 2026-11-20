@@ -2,19 +2,18 @@ package test
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"log"
-	"testing"
-	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
+	"log"
+	"testing"
+	"time"
 )
 
 type MongoProviderSuite struct {
@@ -25,7 +24,7 @@ type MongoProviderSuite struct {
 	streamToken string
 	mgmtToken   string
 	project     string
-	auth        *authUtil.AuthIssuer
+	auth        *authSupport.AuthIssuer
 }
 
 func (s *MongoProviderSuite) SetupSuite() {
@@ -91,8 +90,12 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	if len(events) > 0 {
 		req.EventsRequested = events
 	}
-	authCtx := authUtil.ConvertProject(s.project)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
+	// A Publish poll transmitter needs an active signing key for its iss (#308).
+	if _, err = s.provider.GetKeyService().EnsureSigningKey(ctx, req.Iss, s.project); err != nil {
+		s.FailNow(err.Error())
+	}
 	s.stream, _ = s.provider.GetStreamService().CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: req}, authCtx.ProjectId, nil)
 }
 
@@ -129,8 +132,11 @@ func (s *MongoProviderSuite) TestB_StreamConfig() {
 	configs := s.provider.GetStreamService().ListStreams(context.Background())
 	s.Equal(1, len(configs), "should be one registered")
 
-	s.Equal(s.stream.Id, configs[0].Id, "should be the same s.stream id")
-	s.Equal(26, len(configs[0].EventsDelivered), "Should be 26 events configured for delivery")
+	// ListStreams returns full StreamStateRecords (#300), whose own Id is the
+	// Mongo object id — the SSF stream_id is the embedded configuration's.
+	s.Equal(s.stream.Id, configs[0].StreamConfiguration.Id, "should be the same s.stream id")
+	// 12 SCIM + 5 CAEP + 9 RISC + 4 WISE — update this when GetSupportedEvents changes.
+	s.Equal(30, len(configs[0].EventsDelivered), "Should be 30 events configured for delivery")
 	events, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{
 		MaxEvents: 5, ReturnImmediately: true,
 	})
@@ -151,7 +157,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.generateEvent()
 
 	// Check Events by s.stream id
-	eventIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	eventIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(1, len(eventIds), "should be 1 event")
 
 	if len(eventIds) == 0 {
@@ -162,9 +168,9 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.Equal(1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
-	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id)
 
-	nextIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	nextIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(0, len(nextIds), "Should be no pending events")
 
 	s.generateEvent()
@@ -174,13 +180,13 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.generateEvent()
 	s.generateEvent()
 
-	nextIds, _ = s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	nextIds, _ = pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(5, len(nextIds), "Should be 5 max events")
 	s.ackEvents(nextIds)
 
-	finalIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	finalIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(1, len(finalIds), "should be 1 event")
-	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id)
 }
 
 // TestD_PollingCycle starts an independent thread that generates events over time. The test goes through repeat
@@ -194,7 +200,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 
 	var eventIds []string
 	s.Eventually(func() bool {
-		eventIds, _ = s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: true})
+		eventIds, _ = pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: true}))
 		return len(eventIds) > 0
 	}, 15*time.Second, 500*time.Millisecond)
 
@@ -207,7 +213,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 	callCount := 0
 	for len(events) < 10 && callCount < 30 {
 		log.Println("\nPolling for next events...")
-		nextIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
+		nextIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true}))
 		if len(nextIds) == 0 {
 			time.Sleep(1 * time.Second)
 			continue
@@ -236,7 +242,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 func (s *MongoProviderSuite) ackEvents(ids []string) {
 	for _, id := range ids {
 		if id != "" {
-			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id, 0)
+			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id)
 		}
 	}
 }
@@ -277,7 +283,7 @@ func (s *MongoProviderSuite) generateEvent() {
 
 	state, _ := s.provider.GetStreamService().GetStreamState(context.Background(), s.stream.Id)
 
-	_ = s.provider.GetEventService().AddEventToStream(context.Background(), test1.ID, state.Id.Hex())
+	_ = s.provider.GetEventService().AddEventToStream(context.Background(), daoInterfaces.PendingRef{Jti: test1.ID, AckJti: test1.ID}, state.Id.Hex())
 }
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {
@@ -286,12 +292,17 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	s.NoError(err)
 	s.NotNil(key, "Should be a key returned")
 
-	keyRetrieved, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), issuer)
+	// The default key type since spec #114 is ES256 (I2SIG_KEY_ALG), with a kid
+	// of its own, so look it up with the any-type signer, not the RSA-only
+	// token-key lookup (GetPrivateKey).
+	keyRetrieved, kid, err := s.provider.GetKeyService().GetSigner(context.Background(), issuer, "")
 	s.NoError(err, "Should be no error")
-	s.NotNil(keyRetrieved)
-	s.True(key.Equal(keyRetrieved), "Should be same key")
+	s.Require().NotNil(keyRetrieved)
+	pub, ok := key.Public().(interface{ Equal(crypto.PublicKey) bool })
+	s.Require().True(ok, "public key should support Equal")
+	s.True(pub.Equal(keyRetrieved.Public()), "Should be same key")
 
-	keyFail, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), "should.fail")
+	keyFail, _, err := s.provider.GetKeyService().GetSigner(context.Background(), "should.fail", "")
 	s.Error(err, "No key found for: should.fail")
 	s.Nil(keyFail, "Should be no key returned")
 
@@ -303,14 +314,16 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 
 	s.NotNil(issPubJson, "Check public key returned")
 	if issPubJson != nil {
-		issPub, err := keyfunc.NewJSON(*issPubJson)
+		issPub, err := goSet.NewJwksWithAKP(*issPubJson)
 		s.NoError(err, "No error parsing json into JWKS")
-		s.Contains(issPub.KIDs(), issuer, "Confirm issuer present")
+		s.Contains(issPub.KIDs(), kid, "Confirm the issuer's key present")
 	}
 
 	keys, _ := s.provider.GetKeyService().ListKeyNames(context.Background())
-	s.Len(keys, 2, "Should be 2 keys")
+	// DEFAULT, the suite stream's signing key (test.com, #308) and this issuer.
+	s.Len(keys, 3, "Should be 3 keys")
 	s.Contains(keys, issuer, "Confirm issuer i2test.example.org present")
+	s.Contains(keys, "test.com", "Confirm the suite stream's issuer test.com present")
 	s.Contains(keys, "DEFAULT", "Confirm issuer DEFAULT present")
 
 }
@@ -336,7 +349,7 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 	issPubJson := s.provider.GetKeyService().GetPublicJWKS(context.Background(), issuerPub)
 	s.NotNil(issPubJson)
 	if issPubJson != nil {
-		issPub, err := keyfunc.NewJSON(*issPubJson)
+		issPub, err := goSet.NewJwksWithAKP(*issPubJson)
 		s.NoError(err)
 		s.Contains(issPub.KIDs(), "key-pub")
 	}
@@ -377,10 +390,17 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 	_, err := s.provider.GetStreamService().UpdateStream(context.Background(), "1234", s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.Error(err, "not found")
 
+	// The transmitter's new iss needs an active signing key (#308).
+	_, err = s.provider.GetKeyService().EnsureSigningKey(context.Background(), config.Iss, s.project)
+	s.Require().NoError(err)
+
 	res, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.NoError(err, "Update should have no error")
-	s.Equal(orig.Aud, res.Aud, "Audience should not change")
-	s.Equal(orig.Iss, res.Iss, "Issuer should not change")
+	// iss/aud are patchable on a transmitter since #306 (signing issuer /
+	// advertised audience); before that they were create-only here.
+	s.Equal([]string{"test"}, res.Aud, "Audience follows the patch")
+	s.Equal("meh", res.Iss, "Issuer follows the patch")
+	s.NotEqual(orig.Iss, res.Iss)
 	s.Equal([]string{"abc"}, res.EventsRequested, "Event should be abc")
 	s.Equal(0, len(res.EventsDelivered), "Should be no delivered events")
 
@@ -423,8 +443,8 @@ func (s *MongoProviderSuite) TestI_UpdateRemoteAddress() {
 func (s *MongoProviderSuite) TestZ_SubjectFilterFieldsRoundTrip() {
 	s.T().Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
 
-	authCtx := authUtil.ConvertProject(s.project)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 
 	req := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
@@ -475,8 +495,8 @@ func (s *MongoProviderSuite) TestZ_SubjectFilterFieldsRoundTrip() {
 // create and update. Mirrors the memory-adapter coverage in
 // internal/services/stream_service_subject_filter_test.go.
 func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
-	authCtx := authUtil.ConvertProject(s.project)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 
 	req := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
@@ -486,6 +506,9 @@ func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
 		},
 		SubjectRemovalGraceSeconds: 45,
 	}
+	// A Publish poll transmitter needs an active signing key for its iss (#308).
+	_, err := s.provider.GetKeyService().EnsureSigningKey(ctx, req.Iss, s.project)
+	s.Require().NoError(err)
 
 	created, err := s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
 	s.Require().NoError(err, "CreateStream should succeed")
@@ -506,4 +529,62 @@ func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
 	s.Require().NoError(err, "GetStreamState after update should succeed")
 	s.Equal(90, state.SubjectRemovalGraceSeconds,
 		"subject_removal_grace_seconds must round-trip through Mongo update")
+}
+
+// TestZ_EventValidationRoundTrip verifies the per-receiver event_validation knob
+// (spec #247 issue #250) is persisted on the StreamStateRecord and round-trips
+// through the MongoDB adapter on both create and update. The knob is receive-side
+// only, so the fixture is a ReceivePoll stream. Mirrors the memory-DAO coverage in
+// pkg/services/stream_event_validation_test.go.
+func (s *MongoProviderSuite) TestZ_EventValidationRoundTrip() {
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
+
+	req := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:      []string{"validate.example.com"},
+			Iss:      "validate.com",
+			Delivery: &model.OneOfStreamConfigurationDelivery{PollReceiveMethod: &model.PollReceiveMethod{Method: model.ReceivePoll, EndpointUrl: "https://tx.example/poll"}},
+		},
+		EventValidation: model.EventValidationEnforce,
+	}
+
+	created, err := s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
+	s.Require().NoError(err, "CreateStream should succeed")
+
+	state, err := s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after create should succeed")
+	s.Equal(model.EventValidationEnforce, state.EventValidation,
+		"event_validation must round-trip through Mongo create")
+
+	update := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{Id: created.Id},
+		EventValidation:     model.EventValidationStrict,
+	}
+	_, err = s.provider.GetStreamService().UpdateStream(ctx, created.Id, authCtx.ProjectId, update)
+	s.Require().NoError(err, "UpdateStream should succeed")
+
+	state, err = s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after update should succeed")
+	s.Equal(model.EventValidationStrict, state.EventValidation,
+		"event_validation must round-trip through Mongo update")
+
+	// An empty value stays empty in storage; resolution to the server default is a
+	// read-time concern (StreamService.ResolveEventValidation), not a persisted one.
+	bare := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:      []string{"validate2.example.com"},
+			Iss:      "validate2.com",
+			Delivery: &model.OneOfStreamConfigurationDelivery{PollReceiveMethod: &model.PollReceiveMethod{Method: model.ReceivePoll, EndpointUrl: "https://tx.example/poll2"}},
+		},
+	}
+	createdBare, err := s.provider.GetStreamService().CreateStream(ctx, bare, authCtx.ProjectId, nil)
+	s.Require().NoError(err, "CreateStream without event_validation should succeed")
+	bareState, err := s.provider.GetStreamService().GetStreamState(ctx, createdBare.Id)
+	s.Require().NoError(err)
+	s.Equal(model.EventValidationUnset, bareState.EventValidation,
+		"an unset event_validation must persist as empty")
+	s.Equal(model.EventValidationNone,
+		s.provider.GetStreamService().ResolveEventValidation(bareState),
+		"an unset value resolves to the NONE server default at read time")
 }

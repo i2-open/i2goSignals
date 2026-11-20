@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,10 +51,10 @@ func TestMatchesStreamRejectsUnsubscribedOperationalTypes(t *testing.T) {
 		},
 	}
 
-	verifyEvent := &model.AgEventRecord{
+	verifyEvent := &model.EventRecord{
 		Types: []string{"https://schemas.openid.net/secevent/ssf/event-type/verification"},
 	}
-	streamUpdatedEvent := &model.AgEventRecord{
+	streamUpdatedEvent := &model.EventRecord{
 		Types: []string{"https://schemas.openid.net/secevent/ssf/event-type/stream-updated"},
 	}
 
@@ -86,7 +86,7 @@ func TestResetEventStreamExcludesOperationalEvents(t *testing.T) {
 	streamState, err := instance.GetStreamState(stream.Id)
 	require.NoError(t, err)
 	resetDate := time.Now().Add(-1 * time.Hour)
-	err = instance.ResetEventStream(stream.Id, "", &resetDate, func(rec *model.AgEventRecord) bool {
+	err = instance.ResetEventStream(stream.Id, "", &resetDate, func(rec *model.EventRecord) bool {
 		if rec.Operational {
 			return false
 		}
@@ -111,7 +111,7 @@ func mustCreatePollStream(t *testing.T, instance *ssfInstance, iss string, aud [
 			},
 		},
 	}
-	created, err := instance.CreateStream(cfg, authUtil.ConvertProject(instance.projectId))
+	created, err := instance.CreateStream(cfg, authSupport.ConvertProject(instance.projectId))
 	require.NoError(t, err)
 	return created
 }

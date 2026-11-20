@@ -8,6 +8,11 @@ volumes:
   mongo2_data: {}
   mongo3_data: {}
   mongo_config: {}
+  # /app/resources holds the Mongo resume token and the local WAL
+  # (I2SIG_STORE_WAL_DIR); a named volume keeps them across container restarts.
+  gosignals1_resources: {}
+  gosignals1b_resources: {}
+  gossfserver_resources: {}
 
 services:
   nginx:
@@ -29,7 +34,7 @@ services:
       - scim_cluster2
 
   mongo1:
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -46,7 +51,7 @@ services:
       timeout: 5s
       retries: 5
   mongo2:
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -63,7 +68,7 @@ services:
       timeout: 5s
       retries: 5
   mongo3:
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -80,7 +85,7 @@ services:
       timeout: 5s
       retries: 5
   mongo-init:
-    image: mongo:latest
+    image: mongo:8.0.13
     container_name: mongo-init
     depends_on:
       mongo1:
@@ -151,7 +156,7 @@ services:
       - "./config/certs:/etc/grafana/certs:ro"
 
   goSignals1:
-    image: i2gosignals:v0.8
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSignalsServer
     hostname: goSignals1
     depends_on:
@@ -161,15 +166,22 @@ services:
         condition: service_completed_successfully
     env_file:
       - ./config/goSignals1.env
+    volumes:
+      - gosignals1_resources:/app/resources
+      - "./config/certs:/app/config/certs:ro"
     environment:
       - I2SIG_CLUSTER_NODE_ID=goSignals1
       - BASE_URL=https://gosignals1:8888/
       - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      # Wake-up calls between goSignals1 and goSignals1b go over the plain
+      # HTTP internal listener; each node advertises its own address (#348).
+      - I2SIG_CLUSTER_INTERNAL_PORT=8898
+      - I2SIG_CLUSTER_ADVERTISE_URL=http://goSignals1:8898
       - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSignals1b:
-    image: i2gosignals:v0.8
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSignalsServer
     hostname: goSignals1b
     depends_on:
@@ -179,15 +191,25 @@ services:
         condition: service_completed_successfully
     env_file:
       - ./config/goSignals1.env
+    volumes:
+      - gosignals1b_resources:/app/resources
+      - "./config/certs:/app/config/certs:ro"
     environment:
       - I2SIG_CLUSTER_NODE_ID=goSignals1b
+      # The env file's WAL directory belongs to goSignals1; a WAL directory is
+      # owned by one node and a second node pointed at it refuses to start.
+      - I2SIG_STORE_WAL_DIR=/app/resources/wal/goSignals1b
+      # BASE_URL names goSignals1 (the cluster's public address), so the
+      # wake-up address is set explicitly or peers would call goSignals1 (#348).
       - BASE_URL=https://gosignals1:8888/
       - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_CLUSTER_INTERNAL_PORT=8898
+      - I2SIG_CLUSTER_ADVERTISE_URL=http://goSignals1b:8898
       - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSignals2:
-    image: i2gosignals:v0.8
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSignalsServer
     hostname: goSignals2
     depends_on:
@@ -197,6 +219,8 @@ services:
         condition: service_completed_successfully
     env_file:
       - ./config/goSignals2.env
+    volumes:
+      - "./config/certs:/app/config/certs:ro"
     environment:
       - I2SIG_CLUSTER_NODE_ID=goSignals2
       - BASE_URL=https://gosignals2:8888/
@@ -205,7 +229,7 @@ services:
       - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSsfServer:
-    image: i2gosignals:v0.8
+    image: independentid/i2gosignals:0.12.0
     command: /app/goSsfServer
     hostname: goSsfServer
     depends_on:
@@ -215,15 +239,21 @@ services:
         condition: service_completed_successfully
     env_file:
       - ./config/goSsf1.env
+    volumes:
+      - gossfserver_resources:/app/resources
+      - "./config/certs:/app/config/certs:ro"
     environment:
       - I2SIG_CLUSTER_NODE_ID=goSsfServer
+      # The env file's store directory sits under /app/config, which only the
+      # dev stack's repo mount provides; the image's user can write /app/resources.
+      - I2SIG_STORE_MEM_DIRECTORY=/app/resources/SsfServer1
       - BASE_URL=https://gossfserver:8888/
       - I2SIG_ISSUER_DEFAULT=https://gossfserver:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
       - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   scimSsfSetup:
-    image: i2gosignals:v0.8
+    image: independentid/i2gosignals:0.12.0
     depends_on:
       - mongo1
       - mongo2
@@ -245,7 +275,7 @@ services:
     entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.8.0
+    image: independentid/i2scim-universal:0.10.7
     depends_on:
       goSignals1:
         condition: service_started
@@ -263,7 +293,7 @@ services:
       - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
       - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
   scim_cluster2:
-    image: independentid/i2scim-universal:0.8.0
+    image: independentid/i2scim-universal:0.10.7
     depends_on:
       goSignals1:
         condition: service_started
@@ -281,33 +311,33 @@ services:
       - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
       - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
   postgres:
-    image: postgres:alpine
+    image: postgres:18-alpine
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4.7
+    image: quay.io/keycloak/keycloak:26.7.3
     hostname: keycloak
     command: start --import-realm
     environment:
       KC_HEALTH_ENABLED: true
       KC_HOSTNAME_STRICT: false
-      KC_HOSTNAME_URL: https://keycloak:9080
+      KC_HOSTNAME: https://keycloak:9080
       KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/server-cert.pem
       KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/server-key.pem
       KC_HTTPS_PORT: 9080
       KC_FEATURES: scripts
       KC_SCRIPT_UPLOAD_ENABLED: "true"
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      QUARKUS_HTTP_HOST: 0.0.0.0
+      KC_HTTP_HOST: 0.0.0.0
     depends_on:
       - postgres
     volumes:

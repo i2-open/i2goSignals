@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -13,8 +13,8 @@ import (
 // AuthContext-bearing context. Used by the provider DAO tests to keep the
 // arrange step terse.
 func createStreamHelper(p *MemoryProvider, cfg model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
-	authCtx := authUtil.ConvertProject(projectId)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(projectId)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 	return p.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, authCtx.ProjectId, nil)
 }
 
@@ -151,8 +151,9 @@ func TestMemoryProviderDAOKeyOperations(t *testing.T) {
 		t.Fatal("Failed to create issuer key pair")
 	}
 
-	// Get the private key
-	retrievedKey, err := provider.GetKeyService().GetPrivateKey(context.Background(), "test-issuer")
+	// Get the signing key (the default type since spec #114 is ES256, so this
+	// is the any-type signer, not the RSA-only token-key lookup)
+	retrievedKey, _, err := provider.GetKeyService().GetSigner(context.Background(), "test-issuer", "")
 	if err != nil {
 		t.Fatalf("Failed to get issuer private key: %v", err)
 	}
@@ -174,7 +175,7 @@ func TestMemoryProviderDAOKeyOperations(t *testing.T) {
 	}
 
 	// Verify deletion
-	_, err = provider.GetKeyService().GetPrivateKey(context.Background(), "test-issuer")
+	_, _, err = provider.GetKeyService().GetSigner(context.Background(), "test-issuer", "")
 	if err == nil {
 		t.Error("Expected error when getting deleted key, got nil")
 	}

@@ -1,22 +1,22 @@
 package server
 
 import (
-    "encoding/json"
-    "net/http"
-    "time"
+	"encoding/json"
+	"net/http"
+	"time"
 
-    "github.com/i2-open/i2goSignals/internal/services"
-    "github.com/i2-open/i2goSignals/pkg/authSupport"
-    "github.com/i2-open/i2goSignals/pkg/goSet"
-    model "github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 // subjectFilterReviewRequest is the body of POST /subject-filter/review (PRD
 // #97 issue #101). stream_id is required; subject is optional — when present
 // the response includes a point-lookup result.
 type subjectFilterReviewRequest struct {
-    StreamId string                   `json:"stream_id"`
-    Subject  *goSet.SubjectIdentifier `json:"subject,omitempty"`
+	StreamId string                   `json:"stream_id"`
+	Subject  *goSet.SubjectIdentifier `json:"subject,omitempty"`
 }
 
 // subjectFilterReviewResponse is the wire-format admin review of a stream's
@@ -25,37 +25,38 @@ type subjectFilterReviewRequest struct {
 // types in pkg/services are translated to this shape so the wire format does
 // not move when internal types refactor.
 type subjectFilterReviewResponse struct {
-    StreamId                   string                           `json:"stream_id"`
-    Mode                       string                           `json:"mode,omitempty"`
-    DefaultSubjects            string                           `json:"default_subjects,omitempty"`
-    EventSource                *model.EventSource               `json:"event_source"`
-    SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds"`
-    PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
-    Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
-    Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
-    Lookup                     *subjectFilterReviewLookupResult `json:"lookup,omitempty"`
+	StreamId                   string                           `json:"stream_id"`
+	Mode                       string                           `json:"mode,omitempty"`
+	DefaultSubjects            string                           `json:"default_subjects,omitempty"`
+	EventSource                *model.EventSource               `json:"event_source"`
+	SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds"`
+	EventValidation            model.EventValidationMode        `json:"event_validation"`
+	PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
+	Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
+	Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
+	Lookup                     *subjectFilterReviewLookupResult `json:"lookup,omitempty"`
 }
 
 type subjectFilterReviewCounts struct {
-    Total   int64 `json:"total"`
-    Pending int64 `json:"pending"`
+	Total   int64 `json:"total"`
+	Pending int64 `json:"pending"`
 }
 
 type subjectFilterReviewEntry struct {
-    Subject      *goSet.SubjectIdentifier `json:"subject,omitempty"`
-    CanonicalKey string                   `json:"canonical_key"`
-    Kind         string                   `json:"kind"`
-    EnforceAt    time.Time                `json:"enforce_at"`
+	Subject      *goSet.SubjectIdentifier `json:"subject,omitempty"`
+	CanonicalKey string                   `json:"canonical_key"`
+	Kind         string                   `json:"kind"`
+	EnforceAt    time.Time                `json:"enforce_at"`
 }
 
 type subjectFilterReviewLookupResult struct {
-    Subject      *goSet.SubjectIdentifier `json:"subject"`
-    Found        bool                     `json:"found"`
-    Kind         string                   `json:"kind,omitempty"`
-    CanonicalKey string                   `json:"canonical_key,omitempty"`
-    EnforceAt    time.Time                `json:"enforce_at,omitempty"`
-    Pending      bool                     `json:"pending,omitempty"`
-    Delivers     bool                     `json:"delivers"`
+	Subject      *goSet.SubjectIdentifier `json:"subject"`
+	Found        bool                     `json:"found"`
+	Kind         string                   `json:"kind,omitempty"`
+	CanonicalKey string                   `json:"canonical_key,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitzero"`
+	Pending      bool                     `json:"pending,omitempty"`
+	Delivers     bool                     `json:"delivers"`
 }
 
 // ReviewSubjectFilter handles POST /subject-filter/review (PRD #97 issue #101):
@@ -83,125 +84,150 @@ type subjectFilterReviewLookupResult struct {
 //     stream.
 //   - 500 Internal Server Error: DAO or serialization error.
 func (sa *SignalsApplication) ReviewSubjectFilter(w http.ResponseWriter, r *http.Request) {
-    ReviewSubjectFilterHandler(sa, w, r)
+	ReviewSubjectFilterHandler(sa, w, r)
 }
 
 func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-    if !services.SubjectFilteringEnabled() {
-        // The feature is disabled server-wide; the §9 layer is inert per the
-        // PRD's "disabled by default" stance.
-        w.WriteHeader(http.StatusNotFound)
-        return
-    }
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	if !services.SubjectFilteringEnabled() {
+		// The feature is disabled server-wide; the §9 layer is inert per the
+		// PRD's "disabled by default" stance.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-    authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{
-        authSupport.ScopeStreamAdmin,
-        authSupport.ScopeStreamMgmt,
-        authSupport.ScopeRoot,
-    })
-    if status != http.StatusOK {
-        w.WriteHeader(status)
-        return
-    }
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{
+		authSupport.ScopeStreamAdmin,
+		authSupport.ScopeStreamMgmt,
+		authSupport.ScopeRoot,
+	})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
 
-    var req subjectFilterReviewRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        w.WriteHeader(http.StatusBadRequest)
-        return
-    }
-    if req.StreamId == "" {
-        w.WriteHeader(http.StatusBadRequest)
-        return
-    }
-    // A stream-bound token (mgmt) must match the requested stream; an admin
-    // token has no stream binding and authorizes targeting any stream.
-    if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
-        w.WriteHeader(http.StatusForbidden)
-        return
-    }
+	var req subjectFilterReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if req.StreamId == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	// A stream-bound token (mgmt) must match the requested stream and may name
+	// only its own bound streams (#303); an admin token has no stream binding and
+	// authorizes targeting any stream.
+	if !authCtx.BoundTokenPermits(req.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != req.StreamId) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 
-    stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
-    if err != nil {
-        w.WriteHeader(http.StatusNotFound)
-        return
-    }
+	stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-    filterSvc := sa.GetSubjectFilterService()
-    if filterSvc == nil {
-        w.WriteHeader(http.StatusNotFound)
-        return
-    }
+	filterSvc := sa.GetSubjectFilterService()
+	if filterSvc == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-    review, err := filterSvc.Review(r.Context(), stream, req.Subject)
-    if err != nil {
-        serverLog.Error("Subject filter review failed", "sid", req.StreamId, "error", err)
-        w.WriteHeader(http.StatusInternalServerError)
-        return
-    }
+	review, err := filterSvc.Review(r.Context(), stream, req.Subject)
+	if err != nil {
+		serverLog.Error("Subject filter review failed", "sid", req.StreamId, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
-    body, err := json.Marshal(buildSubjectFilterReviewResponse(stream, review))
-    if err != nil {
-        w.WriteHeader(http.StatusInternalServerError)
-        return
-    }
-    w.WriteHeader(http.StatusOK)
-    _, _ = w.Write(body)
+	// Resolve the per-receiver event-validation mode at read time (spec #247
+	// #250): an empty per-stream value inherits the server-wide
+	// I2SIG_STREAM_EVENT_VALIDATION default, so the review reports what would
+	// actually apply to inbound events.
+	effectiveValidation := sa.GetStreamService().ResolveEventValidation(stream)
+
+	body, err := json.Marshal(buildSubjectFilterReviewResponse(stream, review, effectiveValidation))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // buildSubjectFilterReviewResponse translates the service-layer review into
 // the wire-format response. Kept separate so the JSON contract is one tested
 // adapter and the service stays free of HTTP concerns.
-func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *services.SubjectFilterReview) subjectFilterReviewResponse {
-    out := subjectFilterReviewResponse{
-        StreamId:                   stream.StreamConfiguration.Id,
-        Mode:                       stream.SubjectFilterMode,
-        DefaultSubjects:            stream.DefaultSubjects,
-        EventSource:                effectiveEventSource(stream.EventSource),
-        SubjectRemovalGraceSeconds: effectiveRemovalGrace(stream.SubjectRemovalGraceSeconds),
-        PassthruNoLocalFilter:      review.NoLocalFilter,
-    }
-    if review.Counts != nil {
-        out.Counts = &subjectFilterReviewCounts{
-            Total:   review.Counts.Total,
-            Pending: review.Counts.Pending,
-        }
-    }
-    if len(review.Pending) > 0 {
-        out.Pending = make([]subjectFilterReviewEntry, 0, len(review.Pending))
-        for _, e := range review.Pending {
-            out.Pending = append(out.Pending, subjectFilterReviewEntry{
-                Subject:      e.Subject,
-                CanonicalKey: e.CanonicalKey,
-                Kind:         e.Kind,
-                EnforceAt:    e.EnforceAt,
-            })
-        }
-    }
-    if review.Lookup != nil {
-        out.Lookup = &subjectFilterReviewLookupResult{
-            Subject:      review.Lookup.Subject,
-            Found:        review.Lookup.Found,
-            Kind:         review.Lookup.Kind,
-            CanonicalKey: review.Lookup.CanonicalKey,
-            EnforceAt:    review.Lookup.EnforceAt,
-            Pending:      review.Lookup.Pending,
-            Delivers:     review.Lookup.Delivers,
-        }
-    }
-    return out
+// eventValidation is the already-resolved effective mode (per-stream value or
+// the server default); the adapter stays a pure translation.
+func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *services.SubjectFilterReview, eventValidation model.EventValidationMode) subjectFilterReviewResponse {
+	out := subjectFilterReviewResponse{
+		StreamId:                   stream.StreamConfiguration.Id,
+		Mode:                       stream.SubjectFilterMode,
+		DefaultSubjects:            stream.DefaultSubjects,
+		EventSource:                effectiveEventSource(stream.EventSource),
+		SubjectRemovalGraceSeconds: effectiveRemovalGrace(stream.SubjectRemovalGraceSeconds),
+		EventValidation:            eventValidation,
+		PassthruNoLocalFilter:      review.NoLocalFilter,
+	}
+	if review.Counts != nil {
+		out.Counts = &subjectFilterReviewCounts{
+			Total:   review.Counts.Total,
+			Pending: review.Counts.Pending,
+		}
+	}
+	if len(review.Pending) > 0 {
+		out.Pending = make([]subjectFilterReviewEntry, 0, len(review.Pending))
+		for _, e := range review.Pending {
+			out.Pending = append(out.Pending, subjectFilterReviewEntry{
+				Subject:      e.Subject,
+				CanonicalKey: e.CanonicalKey,
+				Kind:         e.Kind,
+				EnforceAt:    e.EnforceAt,
+			})
+		}
+	}
+	if review.Lookup != nil {
+		out.Lookup = &subjectFilterReviewLookupResult{
+			Subject:      review.Lookup.Subject,
+			Found:        review.Lookup.Found,
+			Kind:         review.Lookup.Kind,
+			CanonicalKey: review.Lookup.CanonicalKey,
+			EnforceAt:    review.Lookup.EnforceAt,
+			Pending:      review.Lookup.Pending,
+			Delivers:     review.Lookup.Delivers,
+		}
+	}
+	return out
 }
 
 // effectiveEventSource resolves a stream's stored EventSource to the value the
-// admin review wire contract surfaces. A nil descriptor has EFFECTIVE type
-// AUDIENCE (GH #118 / the nil-EventSource→AUDIENCE decision: an unset source
-// behaves as audience matching), so it resolves to {"type":"AUDIENCE"} rather
-// than being omitted. A non-nil descriptor is surfaced unchanged.
+// admin review wire contract surfaces. An unset descriptor has EFFECTIVE type
+// DIRECT, per ADR 0004's update of 2026-09-10 ("unset Type resolves to DIRECT,
+// not AUDIENCE"), which supersedes that ADR's original nil→AUDIENCE Decision
+// text. Unset has two spellings, and both resolve: a nil descriptor, and a
+// present descriptor with an empty Type — the shape a request carrying
+// "event_source": {} stores, since validateEventSource accepts it and
+// applyEventSource keeps it verbatim. That is exactly the resolution
+// effectiveEventSourceType in pkg/services/event_service.go applies, the one the
+// router actually routes on, so the review reports the same effective source
+// delivery applies rather than an empty type or its inverse (GH #299, #302).
+//
+// Returning a fresh descriptor for the empty-Type spelling loses nothing:
+// EventSource carries only Type and SourceStreamIds, and validateEventSource's
+// R3 forbids source_stream_ids on every non-EXPLICIT type, the empty default
+// included. A descriptor with a non-empty Type is surfaced unchanged.
+//
+// The key is emitted either way (GH #118): that is the separate, still-standing
+// guarantee that event_source is never omitted from the wire, and it is about
+// key presence, not which type an unset descriptor resolves to.
 func effectiveEventSource(es *model.EventSource) *model.EventSource {
-    if es == nil {
-        return &model.EventSource{Type: model.EventSourceAudience}
-    }
-    return es
+	if es == nil || es.Type == "" {
+		return &model.EventSource{Type: model.EventSourceDirect}
+	}
+	return es
 }
 
 // effectiveRemovalGrace resolves the SSF §9.3 grace seconds surfaced by the
@@ -209,8 +235,8 @@ func effectiveEventSource(es *model.EventSource) *model.EventSource {
 // I2SIG_SUBJECT_REMOVAL_GRACE default. Mirrors SubjectFilterService.resolveGrace
 // so the review reports the same effective value the service enforces.
 func effectiveRemovalGrace(perStream int) int {
-    if perStream > 0 {
-        return perStream
-    }
-    return services.SubjectRemovalGraceDefaultSeconds()
+	if perStream > 0 {
+		return perStream
+	}
+	return services.SubjectRemovalGraceDefaultSeconds()
 }

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -93,8 +93,8 @@ func (suite *SubjectFilteringSuite) TestSubjectHandlersReturn404WhenDisabled() {
 func (suite *SubjectFilteringSuite) newFilterTestStream(defaultSubjects string) (string, string) {
 	t := suite.T()
 	instance := suite.instance
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-		&authUtil.AuthContext{ProjectId: instance.projectId})
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+		&authSupport.AuthContext{ProjectId: instance.projectId})
 
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
@@ -141,7 +141,7 @@ func (suite *SubjectFilteringSuite) TestAddSubjectReturns200() {
 	require.NoError(t, err)
 	subject := &goSet.SubjectIdentifier{Format: "email"}
 	subject.AddEmail("alice@example.com")
-	event := &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+	event := &model.EventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
 	assert.True(t, instance.persistence.SubjectFilterService.Allows(context.Background(), state, event),
 		"after Add Subject the NONE stream must deliver the added subject")
 }

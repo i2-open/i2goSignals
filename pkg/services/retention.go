@@ -1,0 +1,176 @@
+package services
+
+import (
+	"context"
+	"time"
+
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+)
+
+var retLog = logger.Sub("RETENTION")
+
+// EffectiveWindowFunc resolves the effective retention window (in days) for a
+// stream. A nil result — or a non-positive value — means keep-forever: the
+// router writes no expireAt at acknowledgement and the stream does not widen the
+// body sweep. The community default resolver
+// (DefaultEffectiveWindow) returns the per-stream RetentionWindowDays override
+// only, which is nil unless an operator set it: that is why the engine ships
+// DORMANT (ADR 0055 decision 3). The enterprise superset supplies its own
+// resolver that folds in the enrollment-bundle default and cap.
+type EffectiveWindowFunc func(stream *model.StreamStateRecord) *int
+
+// DefaultEffectiveWindow is community's dormant-by-default window resolver: it
+// honors only the per-stream override, treating an unset (nil) override as
+// keep-forever. Without a finite window from this or an enterprise-supplied
+// resolver, nothing ever expires.
+func DefaultEffectiveWindow(stream *model.StreamStateRecord) *int {
+	return stream.RetentionWindowDays
+}
+
+// RetentionSummary is the startup-visible summary of whether a server's streams
+// would ever expire an event. It exists because keep-forever is community's
+// SILENT default (ADR 0055 decision 3): an operator who never set a window has
+// no signal that `events` and `deliveries` grow without bound. Counts are
+// resolver-driven, so an enterprise superset that folds in a bundle default
+// reports its own counts through the same function, passing its own resolver.
+type RetentionSummary struct {
+	// Streams is every stream the summary saw.
+	Streams int
+	// KeepForever counts streams PurgeExpired would skip — no finite window.
+	KeepForever int
+	// Windowed counts streams with a finite (positive) effective window.
+	Windowed int
+}
+
+// SummarizeRetention classifies streams by their effective retention window,
+// resolved through window (nil defaults to DefaultEffectiveWindow, exactly as
+// PurgeExpired does). It applies the SAME keep-forever rule as the purge pass —
+// nil or non-positive — so the reported summary can never claim an expiry the
+// engine would not perform. It is a pure count over an already-loaded stream
+// set: no store access, no allocation per stream, safe to call on the startup
+// path with a nil or empty slice.
+func SummarizeRetention(streams []model.StreamStateRecord, window EffectiveWindowFunc) RetentionSummary {
+	if window == nil {
+		window = DefaultEffectiveWindow
+	}
+
+	summary := RetentionSummary{Streams: len(streams)}
+	for i := range streams {
+		days := window(&streams[i])
+		if days == nil || *days <= 0 {
+			summary.KeepForever++
+			continue
+		}
+		summary.Windowed++
+	}
+	return summary
+}
+
+// OccupancySample is one daily per-stream retained-occupancy observation — the
+// community→enterprise contract feeding ADR 0055's Mean Retained Events (MRE)
+// aggregation. The idempotency key is (ServerURN, StreamURN, SampleDate); every
+// HA replica emits an identical sample because the event store is shared, and
+// tenancy dedups on that key. RetainedCount counts post-ack-retained (delivered,
+// not-yet-purged) JTIs only — pending is excluded.
+type OccupancySample struct {
+	ServerURN     string
+	StreamURN     string
+	SampleDate    string // UTC calendar date, "YYYY-MM-DD"
+	RetainedCount int64
+}
+
+// OccupancySink receives the daily per-stream occupancy samples. Community
+// registers none (the sampler is inert without a sink); the enterprise superset
+// registers one to forward samples to the tenancy MRE aggregator — mirroring the
+// event-router MeteringObserver seam.
+type OccupancySink interface {
+	ObserveOccupancy(sample OccupancySample)
+}
+
+// RetentionEngine owns the bounded retention sweep and the daily occupancy
+// sampler. It holds no scheduler of its own: PurgeExpired and SampleOccupancy
+// are driven by the server's periodic tick (or a test clock), each handed the
+// current stream set so the engine stays decoupled from the StreamDAO.
+type RetentionEngine struct {
+	eventDAO interfaces.EventDAO
+}
+
+// NewRetentionEngine constructs a RetentionEngine over the given event store.
+func NewRetentionEngine(eventDAO interfaces.EventDAO) *RetentionEngine {
+	return &RetentionEngine{eventDAO: eventDAO}
+}
+
+// sweepMaxBodies bounds the number of event bodies one PurgeExpired pass
+// examines, so a large backlog is drained across ticks instead of one long
+// store scan (#360).
+const sweepMaxBodies = 5000
+
+// PurgeExpired runs one bounded retention sweep at time now. Expiry is fixed at
+// acknowledgement: the router stamps each delivered reference with expireAt =
+// ackDate + window (RouterDeps.RetentionWindow), and the store drops references
+// whose expireAt has passed. PurgeExpired then sweeps event bodies older than
+// the longest finite window over streams (by sortTime), deleting each body no
+// reference — pending or delivered, on any stream — still points at. A body
+// shared by two streams therefore survives until the last reference is gone.
+// When no stream has a finite window (nil or non-positive) the pass is a no-op,
+// which is why the engine is inert until a finite window is set. It returns the
+// number of event bodies deleted.
+func (e *RetentionEngine) PurgeExpired(ctx context.Context, now time.Time, streams []model.StreamStateRecord, window EffectiveWindowFunc) (int, error) {
+	if window == nil {
+		window = DefaultEffectiveWindow
+	}
+
+	longest := 0
+	for i := range streams {
+		days := window(&streams[i])
+		if days == nil || *days <= 0 {
+			continue // keep-forever
+		}
+		if *days > longest {
+			longest = *days
+		}
+	}
+	if longest == 0 {
+		return 0, nil
+	}
+
+	bodyCutoff := now.Add(-time.Duration(longest) * 24 * time.Hour)
+	result, err := e.eventDAO.SweepExpired(ctx, now, bodyCutoff, sweepMaxBodies)
+	if err != nil {
+		return 0, err
+	}
+	if result.Bodies > 0 {
+		retLog.Debug("Retention sweep deleted event bodies", "count", result.Bodies, "references", result.References)
+	}
+	return int(result.Bodies), nil
+}
+
+// SampleOccupancy emits one OccupancySample per stream to sink at time now,
+// stamped with serverURN. RetainedCount is the stream's delivered
+// (post-ack-retained) JTI count read from the shared store, so every HA replica
+// produces an identical sample; SampleDate is now's UTC calendar date, making
+// (serverURN, streamURN, sampleDate) the idempotency key tenancy dedups on. A
+// nil sink is a no-op (the sampler is inert until the enterprise superset
+// registers one).
+func (e *RetentionEngine) SampleOccupancy(ctx context.Context, now time.Time, serverURN string, streams []model.StreamStateRecord, sink OccupancySink) error {
+	if sink == nil {
+		return nil
+	}
+	sampleDate := now.UTC().Format("2006-01-02")
+	for i := range streams {
+		streamID := streams[i].Id.Hex()
+		count, err := e.eventDAO.CountRetainedForStream(ctx, streamID)
+		if err != nil {
+			return err
+		}
+		sink.ObserveOccupancy(OccupancySample{
+			ServerURN:     serverURN,
+			StreamURN:     streamID,
+			SampleDate:    sampleDate,
+			RetainedCount: count,
+		})
+	}
+	return nil
+}

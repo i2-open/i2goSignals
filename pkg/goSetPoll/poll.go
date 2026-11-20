@@ -5,21 +5,29 @@
 package goSetPoll
 
 import (
+	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"log/slog"
 	"net/http"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 // PollRequest represents the JSON body of an RFC8936 poll request.
 type PollRequest struct {
 	// MaxEvents is an optional integer indicating the maximum number of unacknowledged SETs to return.
-	MaxEvents int32 `json:"maxEvents,omitempty"`
+	// Zero means absent: the transmitter's default applies. An explicit 0 is AckOnly.
+	MaxEvents int32 `json:"maxEvents,omitzero"`
+
+	// AckOnly marks an acknowledgement-only request (RFC 8936 §2.4): it is sent,
+	// and parsed, as an explicit "maxEvents": 0, and the transmitter returns no
+	// SETs. MaxEvents is ignored when it is set.
+	AckOnly bool `json:"-"`
 
 	// ReturnImmediately indicates whether the transmitter should return immediately even if no results
 	// are available (short polling). When false, the transmitter may hold the connection open (long polling).
-	ReturnImmediately bool `json:"returnImmediately,omitempty"`
+	ReturnImmediately bool `json:"returnImmediately,omitzero"`
 
 	// Acks is a list of event JTIs that the receiver is acknowledging.
 	Acks []string `json:"ack,omitempty"`
@@ -28,7 +36,70 @@ type PollRequest struct {
 	SetErrs map[string]SetErrType `json:"setErrs,omitempty"`
 
 	// TimeoutSecs is an optional timeout in seconds for long polling.
-	TimeoutSecs int `json:"timeoutSecs,omitempty"`
+	TimeoutSecs int `json:"timeoutSecs,omitzero"`
+}
+
+// pollRequestFields is PollRequest without its JSON methods.
+type pollRequestFields PollRequest
+
+// MarshalJSONTo writes an AckOnly request with an explicit "maxEvents": 0,
+// which omitzero would otherwise drop. The hooks are the json/v2 streaming
+// forms and pin goSet.JSONOptionsV1; see its comment for why, and for why the
+// receiver is a value.
+func (p PollRequest) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, &struct {
+		MaxEvents *int32 `json:"maxEvents,omitempty"`
+		pollRequestFields
+	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)}, goSet.JSONOptionsV1)
+}
+
+// UnmarshalJSONFrom sets AckOnly when the request carries an explicit
+// "maxEvents": 0; an absent or null maxEvents leaves it false.
+func (p *PollRequest) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	var in struct {
+		MaxEvents *int32 `json:"maxEvents"`
+		pollRequestFields
+	}
+	if err := jsonv2.UnmarshalDecode(dec, &in, goSet.JSONOptionsV1); err != nil {
+		return err
+	}
+	*p = PollRequest(in.pollRequestFields)
+	p.MaxEvents, p.AckOnly = readMaxEvents(in.MaxEvents)
+	return nil
+}
+
+// MarshalJSON is kept for callers that use the json.Marshaler interface
+// directly; encoding/json itself goes through MarshalJSONTo.
+func (p PollRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// UnmarshalJSON is kept for callers that use the json.Unmarshaler interface
+// directly; encoding/json itself goes through UnmarshalJSONFrom.
+func (p *PollRequest) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, p)
+}
+
+// wireMaxEvents is the maxEvents a request sends: 0 for an ack-only request,
+// none when maxEvents is unset.
+func wireMaxEvents(maxEvents int32, ackOnly bool) *int32 {
+	if ackOnly {
+		zero := int32(0)
+		return &zero
+	}
+	if maxEvents == 0 {
+		return nil
+	}
+	return &maxEvents
+}
+
+// readMaxEvents splits a parsed maxEvents into its value and whether it was
+// an explicit 0.
+func readMaxEvents(maxEvents *int32) (int32, bool) {
+	if maxEvents == nil {
+		return 0, false
+	}
+	return *maxEvents, *maxEvents == 0
 }
 
 // PollResponse represents the JSON body of an RFC8936 poll response.
@@ -37,7 +108,7 @@ type PollResponse struct {
 	Sets map[string]string `json:"sets"`
 
 	// MoreAvailable indicates whether additional SETs are ready to be delivered.
-	MoreAvailable bool `json:"moreAvailable,omitempty"`
+	MoreAvailable bool `json:"moreAvailable,omitzero"`
 }
 
 // SetErrType represents an error reported by the receiver for a specific SET.
@@ -59,6 +130,14 @@ type ParsedPollResponse struct {
 	// These should be sent back in the next poll's SetErrs field.
 	Errors map[string]SetErrType
 
+	// Validations maps JTI to the event-payload dispositions computed by
+	// ReceiverConfig.Validators, for every JTI that reached ParsedSETs. It is nil
+	// when no validator set was configured. A malformed or unsupported disposition
+	// does NOT move a JTI into Errors — this package reports, and the caller that
+	// owns event_validation mode policy decides whether the JTI is acked or
+	// reported in the next poll's setErrs.
+	Validations map[string]goSetValidate.SetResult
+
 	// MoreAvailable indicates whether the transmitter has more events ready.
 	MoreAvailable bool
 }
@@ -72,7 +151,7 @@ type ReceiverConfig struct {
 	Authorization string
 
 	// JWKS for validating received SET signatures. If nil, tokens are parsed without verification.
-	JWKS *keyfunc.JWKS
+	JWKS *goSet.JWKS
 
 	// ExpectedIssuer is the expected "iss" claim. Empty skips validation.
 	ExpectedIssuer string
@@ -80,8 +159,32 @@ type ReceiverConfig struct {
 	// ExpectedAudiences is the list of acceptable "aud" values. Empty skips validation.
 	ExpectedAudiences []string
 
+	// RequireSignature makes signature verification of pulled SETs mandatory (#184
+	// signing-only posture): a SET is rejected with jws_signature_failed when no JWKS
+	// is available to verify it or when verification fails. When false (default),
+	// verification is conditional on JWKS being non-nil (prior behavior).
+	RequireSignature bool
+
+	// Validators optionally engages event-payload validation for this receiver
+	// stream (spec #247). When nil — the default — no validation runs and
+	// ParsedPollResponse.Validations stays nil, so behavior is exactly as it was
+	// before the field existed. When set, dispositions are computed per JTI and
+	// reported on ParsedPollResponse.Validations; this package NEVER moves a JTI
+	// into Errors because of one. event_validation mode policy
+	// (NONE/WARN/ENFORCE/STRICT), the ack/setErrs decision, and the metrics
+	// belong to the caller.
+	Validators *goSetValidate.ValidatorSet
+
 	// HTTPClient is an optional custom HTTP client. If nil, a default is used.
 	HTTPClient *http.Client
+
+	// AllowPlaintext permits EndpointURL to use a scheme other than https.
+	// False (the default) is the business-stream TLS floor (ADR-0066 §2 as
+	// amended by ADR 0076): PollRaw and Poll refuse a plaintext endpoint before
+	// any request is built, whether or not HTTPClient is injected. It carries
+	// the stream's tx_allow_plaintext opt-out. Control streams never set it
+	// (ADR-0063 §1).
+	AllowPlaintext bool
 
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger

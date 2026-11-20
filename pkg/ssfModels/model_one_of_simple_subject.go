@@ -9,12 +9,12 @@
 package model
 
 type OneOfSimpleSubject struct {
-	Account
-	Did
-	Email
-	IssSub
-	JwtId
-	Opaque
-	PhoneNumber
-	SamlAssertionId
+	Account         Account
+	Did             Did
+	Email           Email
+	IssSub          IssSub
+	JwtId           JwtId
+	Opaque          Opaque
+	PhoneNumber     PhoneNumber
+	SamlAssertionId SamlAssertionId
 }

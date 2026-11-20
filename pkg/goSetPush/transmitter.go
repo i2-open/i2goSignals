@@ -2,15 +2,25 @@ package goSetPush
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
+
+// ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
+// in PushResult.Err when TransmitterConfig.EndpointURL is not https and
+// TransmitterConfig.AllowPlaintext is false. StatusCode is 0 (no request was
+// made), so ClassifyResult reports it as a transport failure. It is an alias
+// of the family-wide tlsSupport.ErrPlaintextNotAllowed so errors.Is holds
+// against either name.
+var ErrPlaintextNotAllowed = tlsSupport.ErrPlaintextNotAllowed
 
 // PushSET sends a SET token string to the receiver endpoint per RFC8935.
 // It sets Content-Type to application/secevent+jwt, includes the Authorization header
@@ -18,10 +28,19 @@ import (
 func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) PushResult {
 	log := getLogger(config.Logger)
 
+	// TLS floor: refused before a client is even selected, so an injected
+	// HTTPClient cannot bypass it.
+	if !config.AllowPlaintext && tlsSupport.IsPlaintextEndpoint(config.EndpointURL) {
+		err := fmt.Errorf("RFC8935: %w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+		// WARN, not ERROR: a refused dial is a per-attempt connect failure
+		// (CONTEXT.md log-level policy) and recurs on every delivery attempt.
+		log.Warn("RFC8935: Refusing plaintext push endpoint", "url", config.EndpointURL, "error", err)
+		return PushResult{Err: err}
+	}
+
 	client := config.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-		tlsSupport.CheckCaInstalled(client)
+		client = defaultClient(config.InsecureSkipVerify)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.EndpointURL, strings.NewReader(tokenString))
@@ -94,4 +113,40 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 		Err:        fmt.Errorf("RFC8935: HTTP %s from %s", resp.Status, config.EndpointURL),
 		RetryAfter: retryAfter,
 	}
+}
+
+// Process-wide default clients, one per TLS posture, so consecutive pushes to
+// the same receiver reuse pooled keep-alive connections. Building a client (and
+// therefore an http.Transport with its own connection pool) per PushSET call
+// forced a full TLS handshake on every event — the receiver spent ~70% of its
+// CPU in RSA certificate signing during load tests, and push throughput was
+// capped at ~40 events/s per stream. Sharing the pool removed the handshake
+// from the per-event path (measured 38 → 105 ev/s in docs/perf/e2e-benchmark.md).
+// Callers that need a bespoke posture still pass TransmitterConfig.HTTPClient.
+var (
+	defaultClientOnce [2]sync.Once
+	defaultClients    [2]*http.Client
+)
+
+func defaultClient(insecureSkipVerify bool) *http.Client {
+	idx := 0
+	if insecureSkipVerify {
+		idx = 1
+	}
+	defaultClientOnce[idx].Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConnsPerHost = 64
+		client := &http.Client{Timeout: 60 * time.Second, Transport: transport}
+		if insecureSkipVerify {
+			// Honor the stream's tx_tls_skip_verify: skip receiver cert
+			// verification entirely (dev / self-signed receivers). CheckCaInstalled
+			// is intentionally not called — verification is being disabled.
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // per-stream tx_tls_skip_verify opt-in
+		} else {
+			transport.TLSClientConfig = tlsSupport.Harden(&tls.Config{MinVersion: tls.VersionTLS12})
+			tlsSupport.CheckCaInstalled(client)
+		}
+		defaultClients[idx] = client
+	})
+	return defaultClients[idx]
 }

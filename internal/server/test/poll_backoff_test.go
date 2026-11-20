@@ -1,10 +1,11 @@
 package test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -24,9 +25,10 @@ func TestPollBackoffRetry(t *testing.T) {
 	// Create a polling receiver stream with a bogus URL
 	streamID := "test-poll-backoff"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: "http://localhost:12345/.well-known/jwks.json", // Valid URL format but will cause connection error (temporary)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    "http://localhost:12345/.well-known/jwks.json", // Valid URL format but will cause connection error (temporary)
+		TxAllowPlaintext: true,                                           // plaintext loopback endpoint (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -38,7 +40,7 @@ func TestPollBackoffRetry(t *testing.T) {
 		},
 	}
 
-	atx := authUtil.AuthContext{
+	atx := authSupport.AuthContext{
 		ProjectId: instance.projectId,
 	}
 	// Add stream to provider
@@ -55,24 +57,23 @@ func TestPollBackoffRetry(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Wait for first retry
-	// Delay 0 is 0.1s
-	time.Sleep(200 * time.Millisecond)
+	// Poll for the retry-in-progress reason (base delay 0.1s) rather than
+	// sleeping a fixed interval. A retrying receiver has not paused, so its
+	// status stays enabled (#310).
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStateEnabled &&
+			strings.Contains(st.ErrorMsg, "retry being attempted")
+	}, 2*time.Second, 20*time.Millisecond, "stream should stay enabled with a retry-in-progress message")
 
-	// Check provider status - it should be "paused" with "retry being attempted"
-	updatedState, err := instance.GetStreamState(streamID)
-	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
-	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
+	// After the retry limit (1.0s) is exceeded the stream must be disabled.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStateDisable
+	}, 3*time.Second, 20*time.Millisecond, "stream should disable after exceeding the retry limit")
 
-	// Wait for more retries and eventually exceeding the limit
-	// retryLimit is 1.0s.
-	time.Sleep(1500 * time.Millisecond)
-
-	// Now it should be disabled
 	finalState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "connection error")
 }
 
@@ -85,9 +86,10 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	// Create a polling receiver stream with an invalid JWKS URL (permanent error)
 	streamID := "test-jwks-permanent-error"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "invalid-protocol-in-issuer",
-		IssuerJWKSUrl: "invalid-protocol://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		Id:               streamID,
+		Iss:              "invalid-protocol-in-issuer",
+		IssuerJWKSUrl:    "invalid-protocol://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		TxAllowPlaintext: true,                                            // plaintext loopback endpoint (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -98,7 +100,7 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 			},
 		},
 	}
-	atx := authUtil.AuthContext{
+	atx := authSupport.AuthContext{
 		ProjectId: instance.projectId,
 	}
 
@@ -107,15 +109,17 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
-	// Give it a moment to process
-	time.Sleep(100 * time.Millisecond)
+	// A permanent JWKS error disables the stream almost immediately; poll for it
+	// rather than sleeping a fixed interval.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st != nil && st.Status == model.StreamStateDisable
+	}, 2*time.Second, 20*time.Millisecond, "permanent JWKS error should disable the stream")
 
 	// Get the stream state - it should be disabled due to permanent JWKS error
 	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.NotNil(t, streamState)
-
-	// Stream should be disabled immediately due to permanent error
 	assert.Equal(t, model.StreamStateDisable, streamState.Status)
 	assert.Contains(t, streamState.ErrorMsg, "Error retrieving issuer JWKS public key")
 	assert.Contains(t, streamState.ErrorMsg, "unsupported protocol scheme")

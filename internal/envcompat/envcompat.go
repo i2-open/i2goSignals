@@ -7,10 +7,10 @@
 package envcompat
 
 import (
-    "os"
-    "sync"
+	"os"
+	"sync"
 
-    "github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 )
 
 var envLog = logger.Sub("ENVCOMPAT")
@@ -26,22 +26,22 @@ var warnedOldNames sync.Map
 // are set, the new value wins and a one-time WARN notes that both were
 // observed. Returns "" if neither is set.
 func Lookup(newName, oldName string) string {
-    newVal := os.Getenv(newName)
-    oldVal := os.Getenv(oldName)
+	newVal := os.Getenv(newName)
+	oldVal := os.Getenv(oldName)
 
-    if newVal != "" {
-        if oldVal != "" {
-            warnOnce(oldName, "both deprecated and new env vars set; using new value",
-                "deprecated", oldName, "replacement", newName)
-        }
-        return newVal
-    }
-    if oldVal != "" {
-        warnOnce(oldName, "deprecated env var still in use; rename for v0.11.0",
-            "deprecated", oldName, "replacement", newName)
-        return oldVal
-    }
-    return ""
+	if newVal != "" {
+		if oldVal != "" {
+			warnOnce(oldName, "both deprecated and new env vars set; using new value",
+				"deprecated", oldName, "replacement", newName)
+		}
+		return newVal
+	}
+	if oldVal != "" {
+		warnOnce(oldName, "deprecated env var still in use; rename for v0.11.0",
+			"deprecated", oldName, "replacement", newName)
+		return oldVal
+	}
+	return ""
 }
 
 // LookupWithTranslate behaves like Lookup, but when the value originates
@@ -50,42 +50,42 @@ func Lookup(newName, oldName string) string {
 // (e.g. POLL_SRV_BEHAVIOR string → I2SIG_POLL_RESPECT_STATUS boolean).
 // translate is never applied to a value taken from newName.
 func LookupWithTranslate(newName, oldName string, translate func(string) string) string {
-    newVal := os.Getenv(newName)
-    oldVal := os.Getenv(oldName)
+	newVal := os.Getenv(newName)
+	oldVal := os.Getenv(oldName)
 
-    if newVal != "" {
-        if oldVal != "" {
-            warnOnce(oldName, "both deprecated and new env vars set; using new value",
-                "deprecated", oldName, "replacement", newName)
-        }
-        return newVal
-    }
-    if oldVal != "" {
-        warnOnce(oldName, "deprecated env var still in use; rename for v0.11.0",
-            "deprecated", oldName, "replacement", newName)
-        return translate(oldVal)
-    }
-    return ""
+	if newVal != "" {
+		if oldVal != "" {
+			warnOnce(oldName, "both deprecated and new env vars set; using new value",
+				"deprecated", oldName, "replacement", newName)
+		}
+		return newVal
+	}
+	if oldVal != "" {
+		warnOnce(oldName, "deprecated env var still in use; rename for v0.11.0",
+			"deprecated", oldName, "replacement", newName)
+		return translate(oldVal)
+	}
+	return ""
 }
 
 func warnOnce(oldName, msg string, kv ...any) {
-    if _, loaded := warnedOldNames.LoadOrStore(oldName, struct{}{}); loaded {
-        return
-    }
-    envLog.Warn(msg, kv...)
+	if _, loaded := warnedOldNames.LoadOrStore(oldName, struct{}{}); loaded {
+		return
+	}
+	envLog.Warn(msg, kv...)
 }
 
 // resetWarnOnceForTest clears the warn-once tracker. Test-only.
 func resetWarnOnceForTest() {
-    warnedOldNames.Range(func(k, _ any) bool {
-        warnedOldNames.Delete(k)
-        return true
-    })
+	warnedOldNames.Range(func(k, _ any) bool {
+		warnedOldNames.Delete(k)
+		return true
+	})
 }
 
 // ResetWarnedForTest clears the warn-once tracker so a test in another
 // package can drive a fresh observation of deprecation warnings on the
 // next read of an old name. Test-only — production code must not call.
 func ResetWarnedForTest() {
-    resetWarnOnceForTest()
+	resetWarnOnceForTest()
 }

@@ -1,0 +1,752 @@
+package memory
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+)
+
+func TestEventDAOMemory_Insert(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	event := &goSet.SecurityEventToken{
+		Events: map[string]interface{}{"test": "event"},
+	}
+	event.ID = "test-jti"
+
+	record := &model.EventRecord{
+		Jti:      event.ID,
+		Event:    *event,
+		Original: `{"jti":"test-jti"}`,
+		Types:    []string{"test"},
+		Sid:      "stream-1",
+		SortTime: time.Now(),
+	}
+
+	err := dao.Insert(ctx, record)
+	if err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	// Verify insertion
+	retrieved, err := dao.FindByJTI(ctx, "test-jti")
+	if err != nil {
+		t.Fatalf("FindByJTI failed: %v", err)
+	}
+
+	if retrieved.Jti != "test-jti" {
+		t.Errorf("Expected JTI test-jti, got %s", retrieved.Jti)
+	}
+}
+
+// TestEventDAOMemory_Insert_DuplicateJTI verifies the persistence-layer dedup
+// contract: a second Insert with the same JTI returns interfaces.ErrDuplicateJTI
+// without overwriting the existing record. FindByJTI must continue to return
+// the FIRST insert's payload.
+func TestEventDAOMemory_Insert_DuplicateJTI(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	first := &model.EventRecord{
+		Jti:      "dup-jti",
+		Original: `{"jti":"dup-jti","first":true}`,
+		SortTime: time.Now(),
+	}
+	if err := dao.Insert(ctx, first); err != nil {
+		t.Fatalf("first Insert failed: %v", err)
+	}
+
+	second := &model.EventRecord{
+		Jti:      "dup-jti",
+		Original: `{"jti":"dup-jti","second":true}`,
+		SortTime: time.Now(),
+	}
+	err := dao.Insert(ctx, second)
+	if err == nil {
+		t.Fatalf("second Insert: expected ErrDuplicateJTI, got nil")
+	}
+	if !errors.Is(err, interfaces.ErrDuplicateJTI) {
+		t.Fatalf("second Insert: expected ErrDuplicateJTI, got %v", err)
+	}
+
+	// The existing record must be untouched — the second arrival's payload
+	// must NOT replace the first.
+	got, err := dao.FindByJTI(ctx, "dup-jti")
+	if err != nil {
+		t.Fatalf("FindByJTI after dup: %v", err)
+	}
+	if got == nil {
+		t.Fatal("FindByJTI returned nil after duplicate Insert")
+	}
+	if got.Original != first.Original {
+		t.Errorf("FindByJTI returned overwritten record: got Original=%q want %q",
+			got.Original, first.Original)
+	}
+}
+
+func TestEventDAOMemory_Insert_DistinctJTIs(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	a := &model.EventRecord{Jti: "jti-a", SortTime: time.Now()}
+	b := &model.EventRecord{Jti: "jti-b", SortTime: time.Now()}
+
+	if err := dao.Insert(ctx, a); err != nil {
+		t.Fatalf("Insert(a) failed: %v", err)
+	}
+	if err := dao.Insert(ctx, b); err != nil {
+		t.Fatalf("Insert(b) failed: %v", err)
+	}
+
+	gotA, _ := dao.FindByJTI(ctx, "jti-a")
+	gotB, _ := dao.FindByJTI(ctx, "jti-b")
+	if gotA == nil || gotB == nil {
+		t.Fatalf("expected both records, got a=%v b=%v", gotA, gotB)
+	}
+}
+
+// TestEventDAOMemory_Insert_ConcurrentDuplicates fires 50 goroutines at the
+// same JTI; the write-lock must serialize them so exactly one Insert succeeds
+// and 49 return ErrDuplicateJTI.
+func TestEventDAOMemory_Insert_ConcurrentDuplicates(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	const goroutines = 50
+	var (
+		wg    sync.WaitGroup
+		ok    atomic.Int32
+		dup   atomic.Int32
+		other atomic.Int32
+		start = make(chan struct{})
+	)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := &model.EventRecord{
+				Jti:      "race-jti",
+				SortTime: time.Now(),
+			}
+			err := dao.Insert(ctx, rec)
+			switch {
+			case err == nil:
+				ok.Add(1)
+			case errors.Is(err, interfaces.ErrDuplicateJTI):
+				dup.Add(1)
+			default:
+				other.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := ok.Load(); got != 1 {
+		t.Errorf("expected exactly 1 successful Insert, got %d", got)
+	}
+	if got := dup.Load(); got != goroutines-1 {
+		t.Errorf("expected %d ErrDuplicateJTI, got %d", goroutines-1, got)
+	}
+	if got := other.Load(); got != 0 {
+		t.Errorf("expected 0 other errors, got %d", got)
+	}
+}
+
+func TestEventDAOMemory_FindByJTIs(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	// Insert multiple events
+	jtis := []string{"jti-1", "jti-2", "jti-3"}
+	for _, jti := range jtis {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		event.ID = jti
+
+		record := &model.EventRecord{
+			Jti:      jti,
+			Event:    *event,
+			Original: `{"jti":"` + jti + `"}`,
+			SortTime: time.Now(),
+		}
+		_ = dao.Insert(ctx, record)
+	}
+
+	// Find by multiple JTIs
+	records, err := dao.FindByJTIs(ctx, []string{"jti-1", "jti-3"})
+	if err != nil {
+		t.Fatalf("FindByJTIs failed: %v", err)
+	}
+
+	if len(records) != 2 {
+		t.Errorf("Expected 2 records, got %d", len(records))
+	}
+}
+
+// TestEventDAOMemory_FindByJTIs_ReloadsOriginalFromDisk: with disk
+// persistence the in-memory record drops Original after Insert; the batched
+// read must reload it the way FindByJTI does, or forward-mode delivery would
+// send empty SETs.
+func TestEventDAOMemory_FindByJTIs_ReloadsOriginalFromDisk(t *testing.T) {
+	dao := NewEventDAO()
+	dao.SetPersistDir(t.TempDir())
+	ctx := context.Background()
+
+	for _, jti := range []string{"disk-1", "disk-2"} {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		event.ID = jti
+		if err := dao.Insert(ctx, &model.EventRecord{Jti: jti, Event: *event, Original: `{"jti":"` + jti + `"}`, SortTime: time.Now()}); err != nil {
+			t.Fatalf("Insert failed: %v", err)
+		}
+	}
+
+	records, err := dao.FindByJTIs(ctx, []string{"disk-1", "disk-2", "missing"})
+	if err != nil {
+		t.Fatalf("FindByJTIs failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("Expected 2 records, got %d", len(records))
+	}
+	for _, rec := range records {
+		want := `{"jti":"` + rec.Jti + `"}`
+		if rec.Original != want {
+			t.Errorf("record %s: Original = %q, want %q", rec.Jti, rec.Original, want)
+		}
+	}
+}
+
+func TestEventDAOMemory_AddPending(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	// Insert an event first
+	event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+	event.ID = "test-jti"
+
+	record := &model.EventRecord{
+		Jti:      event.ID,
+		Event:    *event,
+		SortTime: time.Now(),
+	}
+	_ = dao.Insert(ctx, record)
+
+	// Add to pending
+	streamID := ids.NewObjectID()
+	err := dao.AddPending(ctx, refOf("test-jti"), streamID)
+	if err != nil {
+		t.Fatalf("AddPending failed: %v", err)
+	}
+
+	// Verify pending
+	jtis, total, err := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
+	if err != nil {
+		t.Fatalf("GetPendingForStream failed: %v", err)
+	}
+
+	if len(jtis) != 1 {
+		t.Errorf("Expected 1 pending event, got %d", len(jtis))
+	}
+
+	if total != 1 {
+		t.Errorf("Expected total 1, got %d", total)
+	}
+
+	if jtis[0] != "test-jti" {
+		t.Errorf("Expected JTI test-jti, got %s", jtis[0])
+	}
+}
+
+func TestEventDAOMemory_RemovePending(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	// Setup: Insert event and add to pending
+	event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+	event.ID = "test-jti"
+
+	record := &model.EventRecord{
+		Jti:      event.ID,
+		Event:    *event,
+		SortTime: time.Now(),
+	}
+	_ = dao.Insert(ctx, record)
+
+	streamID := ids.NewObjectID()
+	_ = dao.AddPending(ctx, refOf("test-jti"), streamID)
+
+	// Remove from pending
+	removed, err := dao.RemovePendingMany(ctx, []string{"test-jti"}, streamID)
+	if err != nil {
+		t.Fatalf("RemovePendingMany failed: %v", err)
+	}
+
+	if len(removed) != 1 {
+		t.Fatalf("Expected one removed event, got %d", len(removed))
+	}
+
+	if removed[0].Jti != "test-jti" {
+		t.Errorf("Expected JTI test-jti, got %s", removed[0].Jti)
+	}
+
+	// Verify removal
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
+	if len(jtis) != 0 {
+		t.Errorf("Expected 0 pending events after removal, got %d", len(jtis))
+	}
+}
+
+// TestEventDAOMemory_RemovePendingMany asserts one batched ack removes exactly
+// the pending entries named, leaves the rest of the stream and other streams
+// untouched, skips unknown JTIs, and treats an empty batch as a no-op.
+func TestEventDAOMemory_RemovePendingMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
+	for _, jti := range []string{"a-1", "a-2", "a-3", "b-1"} {
+		_ = dao.Insert(ctx, &model.EventRecord{Jti: jti, SortTime: time.Now()})
+	}
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "a-2", "a-3"}), streamA)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "b-1"}), streamB)
+
+	removed, err := dao.RemovePendingMany(ctx, []string{"a-1", "a-3", "missing"}, streamA)
+	if err != nil {
+		t.Fatalf("RemovePendingMany failed: %v", err)
+	}
+	got := map[string]bool{}
+	for _, ev := range removed {
+		if ev.StreamId != streamA {
+			t.Errorf("removed entry %s carries stream %s, want %s", ev.Jti, ev.StreamId, streamA)
+		}
+		got[ev.Jti] = true
+	}
+	if len(got) != 2 || !got["a-1"] || !got["a-3"] {
+		t.Fatalf("removed = %v, want exactly a-1 and a-3", removed)
+	}
+
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamA, 10))
+	if len(jtis) != 1 || jtis[0] != "a-2" {
+		t.Errorf("stream A pending = %v, want [a-2]", jtis)
+	}
+	jtis, _, _ = pageJtis(dao.GetPendingForStream(ctx, streamB, 10))
+	if len(jtis) != 2 {
+		t.Errorf("stream B pending = %v, must be untouched", jtis)
+	}
+
+	removed, err = dao.RemovePendingMany(ctx, nil, streamA)
+	if err != nil || removed != nil {
+		t.Errorf("empty batch: got (%v, %v), want (nil, nil)", removed, err)
+	}
+	removed, err = dao.RemovePendingMany(ctx, []string{"a-2"}, ids.NewObjectID())
+	if err != nil || removed != nil {
+		t.Errorf("unknown stream: got (%v, %v), want (nil, nil)", removed, err)
+	}
+}
+
+func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	// Setup: Add multiple pending events
+	streamID := ids.NewObjectID()
+	for i := 1; i <= 3; i++ {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		jti := ids.NewObjectID()
+		event.ID = jti
+
+		record := &model.EventRecord{
+			Jti:      jti,
+			Event:    *event,
+			SortTime: time.Now(),
+		}
+		_ = dao.Insert(ctx, record)
+		_ = dao.AddPending(ctx, refOf(jti), streamID)
+	}
+
+	// Clear pending
+	count, err := dao.ClearPendingForStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("ClearPendingForStream failed: %v", err)
+	}
+
+	if count != 3 {
+		t.Errorf("Expected 3 cleared events, got %d", count)
+	}
+
+	// Verify clearing
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
+	if len(jtis) != 0 {
+		t.Errorf("Expected 0 pending events after clear, got %d", len(jtis))
+	}
+}
+
+func TestEventDAOMemory_FindByTimeRange(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	// Use truncated times to match JWT NumericDate behavior
+	now := time.Now().Truncate(time.Second)
+	past := now.Add(-1 * time.Hour)
+	future := now.Add(1 * time.Hour)
+
+	// Insert events with different times
+	events := []struct {
+		jti  string
+		time time.Time
+	}{
+		{"jti-past", past},
+		{"jti-now", now},
+		{"jti-future", future},
+	}
+
+	for _, e := range events {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		event.ID = e.jti
+
+		record := &model.EventRecord{
+			Jti:      e.jti,
+			Event:    *event,
+			SortTime: e.time,
+		}
+		_ = dao.Insert(ctx, record)
+	}
+
+	// Find events from now onwards
+	records, err := dao.FindByTimeRange(ctx, now, nil, nil)
+	if err != nil {
+		t.Fatalf("FindByTimeRange failed: %v", err)
+	}
+
+	if len(records) != 2 { // now and future
+		t.Errorf("Expected 2 records, got %d", len(records))
+	}
+
+	// Find events in range (past to future)
+	records, err = dao.FindByTimeRange(ctx, past, &future, nil)
+	if err != nil {
+		t.Fatalf("FindByTimeRange with end failed: %v", err)
+	}
+
+	if len(records) != 3 { // past, now, and future
+		t.Errorf("Expected 3 records in range, got %d", len(records))
+	}
+}
+
+func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	streamID := ids.NewObjectID()
+
+	// Add 5 pending events
+	for i := 1; i <= 5; i++ {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		jti := ids.NewObjectID()
+		event.ID = jti
+
+		record := &model.EventRecord{
+			Jti:      jti,
+			Event:    *event,
+			SortTime: time.Now(),
+		}
+		_ = dao.Insert(ctx, record)
+		_ = dao.AddPending(ctx, refOf(jti), streamID)
+	}
+
+	// Get with limit
+	jtis, total, err := pageJtis(dao.GetPendingForStream(ctx, streamID, 3))
+	if err != nil {
+		t.Fatalf("GetPendingForStream with limit failed: %v", err)
+	}
+
+	if len(jtis) != 3 {
+		t.Errorf("Expected 3 JTIs (limit), got %d", len(jtis))
+	}
+
+	if total != 5 {
+		t.Errorf("Expected total 5, got %d", total)
+	}
+}
+
+func newMemTestRecord(jti, original string) *model.EventRecord {
+	event := goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+	event.ID = jti
+	return &model.EventRecord{
+		Jti:      jti,
+		Event:    event,
+		Original: original,
+		SortTime: time.Now(),
+	}
+}
+
+// TestEventDAOMemory_InsertMany verifies records are stored in slice order
+// and that a duplicate JTI is reported at its index without overwriting the
+// existing record while the remaining records still land.
+func TestEventDAOMemory_InsertMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	existing := newMemTestRecord("jti-b", `{"jti":"jti-b","first":true}`)
+	if err := dao.Insert(ctx, existing); err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	batch := []*model.EventRecord{
+		newMemTestRecord("jti-a", `{"jti":"jti-a"}`),
+		newMemTestRecord("jti-b", `{"jti":"jti-b","second":true}`),
+		newMemTestRecord("jti-c", `{"jti":"jti-c"}`),
+	}
+	results, err := dao.InsertMany(ctx, batch)
+	if err != nil {
+		t.Fatalf("InsertMany failed: %v", err)
+	}
+	if len(results) != len(batch) {
+		t.Fatalf("Expected %d per-record results, got %d", len(batch), len(results))
+	}
+	if results[0] != nil || results[2] != nil {
+		t.Errorf("Expected nil for new records, got [%v, _, %v]", results[0], results[2])
+	}
+	if !errors.Is(results[1], interfaces.ErrDuplicateJTI) {
+		t.Errorf("Expected ErrDuplicateJTI at index 1, got %v", results[1])
+	}
+
+	for _, jti := range []string{"jti-a", "jti-c"} {
+		got, err := dao.FindByJTI(ctx, jti)
+		if err != nil || got == nil {
+			t.Fatalf("FindByJTI(%s) = %v, %v", jti, got, err)
+		}
+	}
+	got, err := dao.FindByJTI(ctx, "jti-b")
+	if err != nil || got == nil {
+		t.Fatalf("FindByJTI(jti-b) = %v, %v", got, err)
+	}
+	if got.Original != existing.Original {
+		t.Errorf("Duplicate must not overwrite existing record: got %q", got.Original)
+	}
+
+	// Empty batch is a no-op.
+	results, err = dao.InsertMany(ctx, nil)
+	if results != nil || err != nil {
+		t.Errorf("Expected (nil, nil) for empty batch, got (%v, %v)", results, err)
+	}
+}
+
+// TestEventDAOMemory_AddPendingMany verifies JTIs are appended in the given
+// order, including a JTI whose body is not stored: a pending marker is a
+// delivery intent recorded independently of the body (ADR 0038), exactly as
+// the Mongo DAO records it.
+func TestEventDAOMemory_AddPendingMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	for _, jti := range []string{"jti-1", "jti-2", "jti-3"} {
+		if err := dao.Insert(ctx, newMemTestRecord(jti, `{"jti":"`+jti+`"}`)); err != nil {
+			t.Fatalf("Insert(%s) failed: %v", jti, err)
+		}
+	}
+
+	streamID := ids.NewObjectID()
+	// Deliberately added out of jti order: GetPendingForStream publishes
+	// ascending jti order (ADR 0040), the same sort the Mongo DAO states
+	// explicitly, so the read must not echo insertion order back.
+	err := dao.AddPendingMany(ctx, refsFrom([]string{"jti-3", "jti-missing", "jti-1", "jti-2"}), streamID)
+	if err != nil {
+		t.Fatalf("AddPendingMany failed: %v", err)
+	}
+
+	jtis, total, err := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
+	if err != nil {
+		t.Fatalf("GetPendingForStream failed: %v", err)
+	}
+	want := []string{"jti-1", "jti-2", "jti-3", "jti-missing"}
+	if total != int64(len(want)) {
+		t.Errorf("Expected total %d, got %d", len(want), total)
+	}
+	if len(jtis) != len(want) {
+		t.Fatalf("Expected %d pending JTIs, got %d: %v", len(want), len(jtis), jtis)
+	}
+	for i := range want {
+		if jtis[i] != want[i] {
+			t.Errorf("Pending[%d]: expected %s, got %s", i, want[i], jtis[i])
+		}
+	}
+
+	// Empty input is a no-op.
+	if err := dao.AddPendingMany(ctx, nil, streamID); err != nil {
+		t.Errorf("AddPendingMany(nil) failed: %v", err)
+	}
+	_, total, _ = pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
+	if total != int64(len(want)) {
+		t.Errorf("Empty AddPendingMany must not change pending count: got %d", total)
+	}
+}
+
+// TestEventDAOMemory_InsertWithPending asserts the one-trip ingest seam (ADR
+// 0043): an accepted record gets exactly one marker per listed stream, a
+// duplicate JTI — already stored, or repeated in the batch — reports
+// ErrDuplicateJTI and adds no marker, and a pending JTI with no record is
+// ignored.
+func TestEventDAOMemory_InsertWithPending(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
+
+	if err := dao.Insert(ctx, &model.EventRecord{Jti: "old"}); err != nil {
+		t.Fatalf("seed insert failed: %v", err)
+	}
+	recs := []*model.EventRecord{{Jti: "new"}, {Jti: "old"}, {Jti: "new"}, {Jti: "solo"}}
+	pending := map[string][]string{
+		streamA: {"new", "old", "solo", "no-record"},
+		streamB: {"new", "old"},
+	}
+	results, err := dao.InsertWithPending(ctx, recs, pendingRefsOf(pending))
+	if err != nil {
+		t.Fatalf("InsertWithPending failed: %v", err)
+	}
+	wantDup := []bool{false, true, true, false}
+	for i, dup := range wantDup {
+		if dup != errors.Is(results[i], interfaces.ErrDuplicateJTI) || (!dup && results[i] != nil) {
+			t.Errorf("results[%d] = %v, want dup=%v", i, results[i], dup)
+		}
+	}
+
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamA, 10))
+	if want := []string{"new", "solo"}; !equalStrings(jtis, want) {
+		t.Errorf("stream A pending = %v, want %v", jtis, want)
+	}
+	jtis, _, _ = pageJtis(dao.GetPendingForStream(ctx, streamB, 10))
+	if want := []string{"new"}; !equalStrings(jtis, want) {
+		t.Errorf("stream B pending = %v, want %v", jtis, want)
+	}
+
+	if results, err = dao.InsertWithPending(ctx, nil, pendingRefsOf(pending)); results != nil || err != nil {
+		t.Errorf("empty batch = (%v, %v), want (nil, nil)", results, err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestEventDAOMemory_Ack asserts the one-call ack: only references pending
+// for the stream are acked and counted (each once), each acked reference
+// becomes delivered carrying ackDate, unknown JTIs change nothing, other
+// streams are untouched, and re-acking is a no-op.
+func TestEventDAOMemory_Ack(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
+	ackDate := time.Now().Truncate(time.Millisecond)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "a-2", "a-3"}), streamA)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "b-1"}), streamB)
+
+	acked, err := dao.Ack(ctx, interfaces.AckBatch{StreamID: streamA, Jtis: []string{"a-1", "a-3", "missing", "a-1"}, AckDate: ackDate})
+	if err != nil {
+		t.Fatalf("Ack failed: %v", err)
+	}
+	if acked != 2 {
+		t.Fatalf("acked = %d, want 2 (a-1, a-3)", acked)
+	}
+
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamA, 10))
+	if len(jtis) != 1 || jtis[0] != "a-2" {
+		t.Errorf("stream A pending = %v, want [a-2]", jtis)
+	}
+	jtis, _, _ = pageJtis(dao.GetPendingForStream(ctx, streamB, 10))
+	if len(jtis) != 2 {
+		t.Errorf("stream B pending = %v, must be untouched", jtis)
+	}
+
+	delivered, _ := dao.ListDeliveredForStream(ctx, streamA)
+	var dj []string
+	for _, d := range delivered {
+		if !d.AckDate.Equal(ackDate) || d.StreamId != streamA {
+			t.Errorf("delivered %+v: want stream %s ackDate %v", d, streamA, ackDate)
+		}
+		dj = append(dj, d.Jti)
+	}
+	if got := sortedCopy(dj); len(got) != 2 || got[0] != "a-1" || got[1] != "a-3" {
+		t.Fatalf("delivered = %v, want exactly [a-1 a-3]", dj)
+	}
+
+	acked, err = dao.Ack(ctx, interfaces.AckBatch{StreamID: streamA, Jtis: []string{"a-1", "a-3"}, AckDate: time.Now()})
+	if err != nil || acked != 0 {
+		t.Errorf("re-ack: got (%d, %v), want 0 and no error", acked, err)
+	}
+	if delivered, _ = dao.ListDeliveredForStream(ctx, streamA); len(delivered) != 2 {
+		t.Errorf("re-ack must not add delivered records, got %d", len(delivered))
+	}
+	if acked, err = dao.Ack(ctx, interfaces.AckBatch{StreamID: streamA, AckDate: ackDate}); err != nil || acked != 0 {
+		t.Errorf("empty batch: got (%d, %v), want (0, nil)", acked, err)
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+// TestEventDAOMemory_EnsurePending pins the ADR 0043 residual repair (#331):
+// a JTI is queued only on the streams that hold neither a pending nor a
+// delivered record for it, the call reports exactly those streams, and a
+// repeat call is a no-op.
+func TestEventDAOMemory_EnsurePending(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	if err := dao.Insert(ctx, &model.EventRecord{Jti: "ens", Original: `{"jti":"ens"}`, SortTime: time.Now()}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := dao.AddPending(ctx, refOf("ens"), "has-pending"); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+	markDelivered(t, dao, "ens", "was-delivered", time.Now())
+
+	queued, err := dao.EnsurePending(ctx, "ens", nil)
+	if err != nil || queued != nil {
+		t.Fatalf("empty streamIDs: got (%v, %v), want (nil, nil)", queued, err)
+	}
+
+	queued, err = dao.EnsurePending(ctx, "ens", selfAck([]string{"has-pending", "was-delivered", "missing"}))
+	if err != nil {
+		t.Fatalf("EnsurePending: %v", err)
+	}
+	if len(queued) != 1 || queued[0] != "missing" {
+		t.Fatalf("queued = %v, want [missing]", queued)
+	}
+	for stream, want := range map[string]int{"has-pending": 1, "was-delivered": 0, "missing": 1} {
+		evs, _, err := pageJtis(dao.GetPendingForStream(ctx, stream, 10))
+		if err != nil {
+			t.Fatalf("GetPendingForStream(%s): %v", stream, err)
+		}
+		if len(evs) != want {
+			t.Errorf("stream %s: %d pending, want %d", stream, len(evs), want)
+		}
+	}
+
+	queued, err = dao.EnsurePending(ctx, "ens", selfAck([]string{"has-pending", "was-delivered", "missing"}))
+	if err != nil || len(queued) != 0 {
+		t.Fatalf("repeat call: got (%v, %v), want nothing queued", queued, err)
+	}
+}

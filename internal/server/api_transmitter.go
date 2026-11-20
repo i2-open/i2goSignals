@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -26,6 +27,9 @@ import (
 //   - 401/403: Unauthorized access.
 //   - 404 Not Found: Stream not found.
 //   - 500 Internal Server Error: Error during polling or database access.
+//   - 503 Service Unavailable: the stream is paused, or it signs its SETs and
+//     has no active signing key for its iss and signing_alg; the plain-text
+//     body then names the issuer and algorithm, and the stream is paused (#312).
 func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
 	PollEventsHandler(sa, w, r)
 }
@@ -67,6 +71,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	// Convert to internal model type for application-layer processing
 	request := model.PollParameters{
 		MaxEvents:         pollReq.MaxEvents,
+		AckOnly:           pollReq.AckOnly,
 		ReturnImmediately: pollReq.ReturnImmediately,
 		Acks:              pollReq.Acks,
 		TimeoutSecs:       pollReq.TimeoutSecs,
@@ -114,16 +119,11 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	}
 	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] %sPoll received...", authCtx.StreamId, wait))
 
-	// First, process the acknowledgements
-	for _, jti := range request.Acks {
-		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]", authCtx.StreamId, jti))
-		err = sa.GetEventService().AckEvent(r.Context(), jti, authCtx.StreamId, 0)
-		if err != nil {
-			serverLog.Error("Error acking event in poll", "sid", authCtx.StreamId, "jti", jti, "error", err)
-		}
-		event := sa.GetEventService().GetEvent(r.Context(), jti)
-		serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
-		sa.GetEventRouter().IncrementCounter(streamState, event, false)
+	// The acks are applied once, as a batch, by PollStreamHandler below; its
+	// delivery queue counts each newly delivered row on the outbound metric,
+	// so no store read precedes the acknowledgement (#363).
+	if len(request.Acks) > 0 {
+		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking %d events", authCtx.StreamId, len(request.Acks)))
 	}
 
 	// Second, log any errors received
@@ -132,8 +132,24 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		serverLog.Warn(errMsg)
 	}
 
-	sets, more, status := sa.GetEventRouter().PollStreamHandler(authCtx.StreamId, request)
+	sets, more, status := sa.GetEventRouter().PollStreamHandler(r.Context(), authCtx.StreamId, request)
 
+	if status == http.StatusServiceUnavailable {
+		// Delivery waits for the legacy deliveries migration at startup (#361):
+		// nothing was read or acknowledged; the receiver retries.
+		if !sa.GetEventRouter().DeliveryStarted() {
+			http.Error(w, "Delivery has not started yet; retry later", status)
+			return
+		}
+	}
+	if status == eventRouter.PollKeyUnavailableStatus {
+		// The stream has no active signing key: nothing was sent, its events
+		// stay queued and it is now paused (#312). Say which key is missing,
+		// and when it expired or becomes valid if that is why (#318).
+		cfg := streamState.StreamConfiguration
+		http.Error(w, sa.GetStreamService().SigningKeyUnavailableReason(r.Context(), cfg.Iss, cfg.SigningAlg), status)
+		return
+	}
 	if status != http.StatusOK {
 		http.Error(w, "Stream not found or not ready", status)
 		return

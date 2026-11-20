@@ -5,19 +5,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rsa"
+	"crypto"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
+	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 
 	"io"
 	"log"
@@ -25,16 +28,58 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/alecthomas/kong"
 	_ "github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"go.yaml.in/yaml/v4"
 )
 
-// getHttpClient returns a standard or SPIFFE-aware HTTP client
+// getHttpClient returns a standard or SPIFFE-aware HTTP client.
+// I2SIG_TX_TLS_SKIP_VERIFY=true (conformance-only) disables cert verification
+// for outbound CLI calls — the same knob the server honors for outbound push
+// delivery. Used by the receiver-conformance harness against the suite's
+// emulated transmitter, whose dev cert has no matching SAN.
+// normalizeJWTAud rewrites a top-level `"aud": "x"` to `"aud": ["x"]` in the
+// given JSON body so model.StreamConfiguration (Aud []string) can unmarshal a
+// scalar audience. Per RFC 7519 §4.1.3 the `aud` claim may be a string or
+// array; goSignals' wire model only handles the array form. No-op when aud is
+// already an array, null, or absent. Scope: response normalization only —
+// outbound bodies still emit an array.
+func normalizeJWTAud(body []byte) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	audRaw, ok := raw["aud"]
+	if !ok {
+		return body
+	}
+	trimmed := bytes.TrimSpace(audRaw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return body
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err != nil {
+		return body
+	}
+	wrapped, err := json.Marshal([]string{s})
+	if err != nil {
+		return body
+	}
+	raw["aud"] = wrapped
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func getHttpClient(timeout time.Duration) *http.Client {
 	client := &http.Client{Timeout: timeout}
 	if spiffeSource != nil {
@@ -44,6 +89,10 @@ func getHttpClient(timeout time.Duration) *http.Client {
 		} else {
 			log.Printf("Warning: Failed to create resilient SPIFFE transport: %v", err)
 			client.Transport = tlsSupport.NewClusterMTLSClientTransport(spiffeSource)
+		}
+	} else if strings.EqualFold(os.Getenv("I2SIG_TX_TLS_SKIP_VERIFY"), "true") {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec // explicit opt-in via I2SIG_TX_TLS_SKIP_VERIFY (conformance-only)
 		}
 	} else {
 		tlsSupport.CheckCaInstalled(client)
@@ -63,6 +112,7 @@ type AddServerCmd struct {
 	TokenUrl     string   `help:"OAuth token endpoint for the transmitter (optional; discovered if omitted)"`
 	Scopes       []string `sep:"," help:"Comma-separated OAuth scopes for the client-credentials grant"`
 	Bootstrap    bool     `help:"Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)"`
+	StrictSsf    bool     `name:"strict-ssf" help:"Treat the server as a strict-spec SSF transmitter (SSF §8.1.1.1): the CLI will strip iss/aud/issuerJWKSUrl from publisher-leg POSTs. Use for the OpenID conformance suite; leave off for goSignals-to-goSignals cluster connections."`
 }
 
 func (as *AddServerCmd) Run(c *CLI) error {
@@ -86,11 +136,27 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		}
 	}
 	server := SsfServer{
-		Alias:   as.Alias,
-		Host:    serverUrl.String(),
-		Streams: map[string]Stream{},
+		Alias:     as.Alias,
+		Host:      serverUrl.String(),
+		Streams:   map[string]Stream{},
+		StrictSsf: as.StrictSsf,
 	}
-	tryUrl, _ := serverUrl.Parse("/.well-known/ssf-configuration")
+	// Build the discovery URL per SSF §7.2 / RFC 8615 (issue #187): the
+	// well-known component is INSERTED between the host and any issuer path,
+	// not appended. The OpenID conformance suite's emulated transmitter lives
+	// under /test/a/<alias>, so an issuer of
+	//   https://host/test/a/<alias>
+	// must be probed at
+	//   https://host/.well-known/ssf-configuration/test/a/<alias>
+	// A host-only issuer yields https://host/.well-known/ssf-configuration.
+	discoveryUrlStr, err := wellKnownSupport.InsertWellKnownURL(serverUrl.String(), wellKnownSupport.SSFConfigurationPath)
+	if err != nil {
+		return err
+	}
+	tryUrl, err := url.Parse(discoveryUrlStr)
+	if err != nil {
+		return err
+	}
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	client := getHttpClient(30 * time.Second)
@@ -119,6 +185,18 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		return err
 	}
 	server.ServerConfiguration = &transmitterConfiguration
+
+	// SSF §7.2.4 issuer binding: the issuer advertised in the discovery document
+	// must equal the location it was retrieved from (server.Host carries any
+	// HTTP-fallback scheme change). jwks_uri is free-form and not checked. A
+	// strict-spec transmitter (--strict-ssf) must bind exactly or the add aborts;
+	// a flexible peer only warns. Keyed off the per-server StrictSsf posture, NOT
+	// the goSsfServer-only I2SIG_STRICT_SSF env flag.
+	if warn, berr := wellKnownSupport.EvaluateIssuerBinding(transmitterConfiguration.Issuer, server.Host, as.StrictSsf); berr != nil {
+		return berr
+	} else if warn != "" {
+		fmt.Println("Warning: " + warn)
+	}
 
 	// `add server` is connect-only: it performs SSF discovery and records the
 	// server without minting any credential. Interactive auth happens later via
@@ -251,11 +329,12 @@ func (p *CreatePollPublisherCmd) Run(cli *CLI) error {
 }
 
 type CreatePushPublisherCmd struct {
-	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	EventUrl string `short:"e" group:"man" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if Connect not provided."`
-	Auth     string `group:"man" help:"Provide the authorization header to used to submit events at the endpoint url. Required if Connect not provided."`
-	Connect  string `short:"c" group:"auto" xor:"auto,man" help:"The Alias of a stream which is receiving events."`
-	Mode     string `optional:"" default:"PUBLISH" enum:"FORWARD,PUBLISH,F,P" help:"What should the receiver to with received events"`
+	Alias          string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl       string `short:"e" group:"man" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if Connect not provided."`
+	Auth           string `group:"man" help:"Provide the authorization header to used to submit events at the endpoint url. Required if Connect not provided."`
+	Connect        string `short:"c" group:"auto" xor:"auto,man" help:"The Alias of a stream which is receiving events."`
+	Mode           string `optional:"" default:"PUBLISH" enum:"FORWARD,PUBLISH,F,P" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt this stream out of the business-stream TLS floor so the server may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
@@ -308,6 +387,7 @@ func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 	}
 
 	// Should override be allowed if destAlias is set?
+	reg.TxAllowPlaintext = p.AllowPlaintext
 
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -325,13 +405,14 @@ func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 }
 
 type CreatePollReceiverCmd struct {
-	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
-	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
-	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
-	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). Requires an ADMIN credential (not the IAT): the transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
-	Secret   string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
-	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
+	Alias          string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl       string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
+	Auth           string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
+	Connect        string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
+	TxAlias        string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). Requires an ADMIN credential (not the IAT): the transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
+	Secret         string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
+	Mode           string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt this stream out of the business-stream TLS floor so the server may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
@@ -396,6 +477,7 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 		}
 	}
 
+	reg.TxAllowPlaintext = p.AllowPlaintext
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
 	if err != nil {
@@ -461,9 +543,10 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 }
 
 type CreatePollConnectionCmd struct {
-	SourceAlias string `arg:"" help:"The alias of the publishing server or existing stream alias."`
-	DestAlias   string `arg:"" help:"The alias of receiving server."`
-	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	SourceAlias    string `arg:"" help:"The alias of the publishing server or existing stream alias."`
+	DestAlias      string `arg:"" help:"The alias of receiving server."`
+	Mode           string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt the dialing (transmitter / receiver-poll) half out of the business-stream TLS floor so it may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 // createRegRequestFromParams creates the complimentary connecting stream based on an input stream.
@@ -552,33 +635,12 @@ func createRegRequestFromParams(method string, modeParam string, cli *CLI, conne
 	return reg
 }
 
+// calculateEvents resolves the operator's requested event patterns against the
+// transmitter's advertised events_supported. The glob semantics live in
+// model.MatchDeliveredEvents so the CLI and the server share exactly one
+// implementation of the pattern -> URI matching.
 func calculateEvents(requested []string, supported []string) []string {
-	var delivered []string
-	if len(requested) == 0 {
-		return []string{}
-	}
-	if requested[0] == "*" {
-		delivered = supported
-		return delivered
-	}
-
-	for _, reqUri := range requested {
-		compUri := "(?i)" + reqUri
-		if strings.Contains(reqUri, "*") {
-			compUri = strings.Replace(compUri, "*", ".*", -1)
-		}
-
-		for _, eventUri := range supported {
-			match, err := regexp.MatchString(compUri, eventUri)
-			if err != nil {
-				continue
-			} // ignore bad input
-			if match {
-				delivered = append(delivered, eventUri)
-			}
-		}
-	}
-	return delivered
+	return model.MatchDeliveredEvents(requested, supported)
 }
 
 func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
@@ -600,7 +662,7 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 
 	var regReceiveStreamRequest, regPublisherStreamRequest *model.StreamConfiguration
 
-	name := generateAlias(3)
+	name := authSupport.GenerateAlias(3)
 	pubName := name + "-pub"
 	rcvName := name + "-rcv"
 	if streamPub != nil {
@@ -672,7 +734,45 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 		regReceiveStreamRequest = createRegRequestFromParams(model.ReceivePoll, p.Mode, cli, pubConfig)
 	}
 
+	// Carry the foreign transmitter's bearer onto the receiver stream as
+	// TxToken so outbound verify / status / stream-management calls back to
+	// that transmitter are authenticated. The bearer is the operator-configured
+	// token used when `add server <pub-alias> --token=<...>` registered the
+	// publisher; without it those calls land unauthorized.
+	if serverPub != nil && serverPub.ClientToken != "" {
+		tok := serverPub.ClientToken
+		regReceiveStreamRequest.TxToken = &tok
+	}
+	// Wire the foreign transmitter's stream id onto the receiver so cascade
+	// DELETE (SSF §8.1.1.5) and verify-on-establish can address the publisher
+	// stream by its transmitter-side id. Without this, CascadeReceiverStreamDelete
+	// silently early-outs (conf.RemoteStreamId == nil) and the suite-side pub
+	// stream is never deleted — the conformance test module stays in WAITING
+	// and times out. The publisher already exists by this point (created
+	// in-place above, or pre-existing in cli.Data), so we know its id.
+	if pubConfig == nil && streamPub != nil {
+		if existingPub, errPub := cli.Data.GetStreamConfig(streamPub.Alias); errPub == nil {
+			pubConfig = existingPub
+		}
+	}
+	if pubConfig != nil && pubConfig.Id != "" {
+		rid := pubConfig.Id
+		regReceiveStreamRequest.RemoteStreamId = &rid
+	}
+	// Wire the foreign transmitter's well-known URL onto the receiver so the
+	// SUT can resolve the publisher's configuration_endpoint at cascade-DELETE
+	// time. resolveTransmitterConfigEndpoint falls back to FetchSSFConfiguration
+	// on TxWellKnownUrl when no TxAlias-keyed Server record exists — and the
+	// conformance suite stream is foreign to the SUT, so no such record exists.
+	// Without this, the cascade silently no-ops and the test module stays in
+	// WAITING (SSF §8.1.1.5).
+	if serverPub != nil && serverPub.Host != "" {
+		if wkURL, errWk := wellKnownSupport.InsertWellKnownURL(serverPub.Host, wellKnownSupport.SSFConfigurationPath); errWk == nil && wkURL != "" {
+			regReceiveStreamRequest.TxWellKnownUrl = &wkURL
+		}
+	}
 	fmt.Println("Creating polling receiver stream...")
+	regReceiveStreamRequest.TxAllowPlaintext = p.AllowPlaintext
 	_, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Poll Receivers Connection from "+pubName, pubName)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error creating polling receiver stream on %s: %s", serverRcv.Alias, err.Error()))
@@ -682,9 +782,10 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 }
 
 type CreatePushConnectionCmd struct {
-	SourceAlias string `arg:"" help:"The alias of the publishing server."`
-	DestAlias   string `arg:"" help:"The alias of receiving server or existing stream alias."`
-	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	SourceAlias    string `arg:"" help:"The alias of the publishing server."`
+	DestAlias      string `arg:"" help:"The alias of receiving server or existing stream alias."`
+	Mode           string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt the dialing (transmitter / receiver-poll) half out of the business-stream TLS floor so it may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
@@ -708,7 +809,7 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 
 	var regReceiveStreamRequest, regPublisherStreamRequest *model.StreamConfiguration
 
-	name := generateAlias(3)
+	name := authSupport.GenerateAlias(3)
 	pubName := name + "-pub"
 	rcvName := name + "-rcv"
 	if streamRcv != nil {
@@ -767,6 +868,13 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 	var streamConfig *model.StreamConfiguration
 	var err error
 	if regReceiveStreamRequest != nil {
+		// See push-connection rationale above: plumb the foreign transmitter's
+		// bearer onto the receiver stream so outbound verify / status /
+		// stream-management calls back to the transmitter are authenticated.
+		if serverPub != nil && serverPub.ClientToken != "" {
+			tok := serverPub.ClientToken
+			regReceiveStreamRequest.TxToken = &tok
+		}
 		fmt.Println("Creating push receiver stream...")
 		streamConfig, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Push Receiver Connection from "+pubName, pubName)
 		if err != nil {
@@ -780,12 +888,75 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, p.Mode, cli, streamConfig)
 	}
 
+	regPublisherStreamRequest.TxAllowPlaintext = p.AllowPlaintext
 	fmt.Println("Creating push publisher stream...")
-	_, err = cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
+	pubStreamConfig, err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error creating push publisher stream on %s: %s", serverPub.Alias, err.Error()))
 	}
 	fmt.Printf("... %s created.", pubName)
+
+	// Back-patch the SUT-side receiver stream with the publisher (transmitter)
+	// stream id so the receiver's verify-on-establish and status lookups quote
+	// the transmitter's stream_id, not its own local id. The POLL path does this
+	// implicitly in pkg/services/stream_service.go (sets config.RemoteStreamId
+	// from the txStreamResp.Id) because that path drives both registrations from
+	// a single in-process service call. The PUSH path creates the receiver
+	// first, then the publisher, so the receiver record is persisted before the
+	// remote stream id is known. Without this PATCH the SUT-side receiver sends
+	// its OWN id when calling back to the transmitter (the conformance suite),
+	// which 404s every verify/status request and blocks the verification and
+	// supported-events modules. Best-effort: log and continue on failure so
+	// connection creation itself is not regressed.
+	if pubStreamConfig != nil && streamRcv != nil && serverRcv != nil &&
+		serverRcv.ServerConfiguration.ConfigurationEndpoint != "" {
+		patchBody := map[string]any{
+			"stream_id":        streamRcv.Id,
+			"remote_stream_id": pubStreamConfig.Id,
+		}
+		// Iss/Aud are transmitter-asserted (SSF 1.0 §7.1.1). The publisher
+		// stream we just created on the foreign transmitter carries the values
+		// it will sign and audience-stamp every SET with; without back-patching
+		// them onto the local receiver record, inbound SETs fail
+		// audience/issuer validation in goSetPush.ParseReceivedSET. The poll
+		// receiver path applies these in-process during CreateStream, so this
+		// patch is the push-only equivalent.
+		if pubStreamConfig.Iss != "" {
+			patchBody["iss"] = pubStreamConfig.Iss
+		}
+		if len(pubStreamConfig.Aud) > 0 {
+			patchBody["aud"] = pubStreamConfig.Aud
+		}
+		if patchBytes, mErr := json.Marshal(patchBody); mErr == nil {
+			patchUrl := serverRcv.ServerConfiguration.ConfigurationEndpoint + "?stream_id=" + streamRcv.Id
+			patchReq, pErr := http.NewRequest(http.MethodPatch, patchUrl, bytes.NewReader(patchBytes))
+			if pErr == nil {
+				patchReq.Header.Set("Content-Type", "application/json")
+				if bearer, bErr := serverBearer(&cli.Globals, serverRcv); bErr == nil && bearer != "" {
+					patchReq.Header.Set("Authorization", "Bearer "+bearer)
+				}
+				patchClient := getHttpClient(0)
+				patchResp, doErr := patchClient.Do(patchReq)
+				if doErr != nil {
+					fmt.Printf("warning: failed to back-patch remote_stream_id on receiver %s: %s\n", rcvName, doErr.Error())
+				} else {
+					if patchResp.StatusCode != http.StatusOK && patchResp.StatusCode != http.StatusNoContent {
+						respBody, _ := io.ReadAll(patchResp.Body)
+						fmt.Printf("warning: back-patch of remote_stream_id on receiver %s returned %s (body: %s)\n", rcvName, patchResp.Status, string(respBody))
+					} else {
+						cli.Data.ResetStreamConfig(rcvName)
+					}
+					httpSupport.HandleRespClose(patchResp)
+				}
+				patchClient.CloseIdleConnections()
+			} else {
+				fmt.Printf("warning: failed to build back-patch request for receiver %s: %s\n", rcvName, pErr.Error())
+			}
+		} else {
+			fmt.Printf("warning: failed to marshal back-patch body for receiver %s: %s\n", rcvName, mErr.Error())
+		}
+	}
+
 	return nil
 }
 
@@ -798,68 +969,68 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 // success (idempotent). The resolved client secret rides on the request body
 // only; it is never persisted to config.json.
 func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar string) error {
-    reg, err := cli.Data.BuildServerRegistration(alias, flagSecret, envVar)
-    if err != nil {
-        return err
-    }
+	reg, err := cli.Data.BuildServerRegistration(alias, flagSecret, envVar)
+	if err != nil {
+		return err
+	}
 
-    serverUrl, err := url.Parse(node.Host)
-    if err != nil {
-        return err
-    }
-    regUrl, err := serverUrl.Parse("/server")
-    if err != nil {
-        return err
-    }
+	serverUrl, err := url.Parse(node.Host)
+	if err != nil {
+		return err
+	}
+	regUrl, err := serverUrl.Parse("/server")
+	if err != nil {
+		return err
+	}
 
-    bodyBytes, err := json.Marshal(reg)
-    if err != nil {
-        return err
-    }
+	bodyBytes, err := json.Marshal(reg)
+	if err != nil {
+		return err
+	}
 
-    req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bodyBytes))
-    if err != nil {
-        return err
-    }
-    req.Header.Set("Content-Type", "application/json")
-    bearer, err := serverBearer(&cli.Globals, node)
-    if err != nil {
-        return err
-    }
-    // Proactive fail-fast (#139): registering a foreign transmitter requires
-    // admin scope. When the resolved credential decodes to a goSignals
-    // ClientToken whose scopes lack admin/root, short-circuit BEFORE the network
-    // call with an actionable message. If the credential cannot be classified
-    // locally (opaque/IdP token), degrade gracefully and fall through.
-    if known, hasAdmin := clientTokenHasAdminScope(bearer); known && !hasAdmin {
-        return errTxAliasAdminRequired
-    }
-    if bearer != "" {
-        req.Header.Set("Authorization", "Bearer "+bearer)
-    }
+	req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bearer, err := serverBearer(&cli.Globals, node)
+	if err != nil {
+		return err
+	}
+	// Proactive fail-fast (#139): registering a foreign transmitter requires
+	// admin scope. When the resolved credential decodes to a goSignals
+	// ClientToken whose scopes lack admin/root, short-circuit BEFORE the network
+	// call with an actionable message. If the credential cannot be classified
+	// locally (opaque/IdP token), degrade gracefully and fall through.
+	if known, hasAdmin := clientTokenHasAdminScope(bearer); known && !hasAdmin {
+		return errTxAliasAdminRequired
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 
-    client := getHttpClient(0)
-    resp, err := client.Do(req)
-    if err != nil {
-        return err
-    }
-    defer httpSupport.HandleRespClose(resp)
+	client := getHttpClient(0)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
 
-    switch resp.StatusCode {
-    case http.StatusOK, http.StatusCreated:
-        return nil
-    case http.StatusConflict:
-        // Transmitter already registered on this node — proceed.
-        fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
-        return nil
-    case http.StatusUnauthorized, http.StatusForbidden:
-        // Reactive translation (#139): surface the SAME actionable admin-scope
-        // guidance instead of leaking a raw status/body.
-        return errTxAliasAdminRequired
-    default:
-        body, _ := io.ReadAll(resp.Body)
-        return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
-    }
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		return nil
+	case http.StatusConflict:
+		// Transmitter already registered on this node — proceed.
+		fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// Reactive translation (#139): surface the SAME actionable admin-scope
+		// guidance instead of leaking a raw status/body.
+		return errTxAliasAdminRequired
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
+	}
 }
 
 // errTxAliasAdminRequired is the actionable guidance returned both proactively
@@ -873,20 +1044,51 @@ var errTxAliasAdminRequired = errors.New("registering tx-alias requires admin sc
 // opaque or non-goSignals token returns known=false so callers degrade
 // gracefully and proceed to the network.
 func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
-    if bearer == "" {
-        return false, false
-    }
-    var eat authSupport.EventAuthToken
-    parser := jwt.NewParser()
-    if _, _, err := parser.ParseUnverified(bearer, &eat); err != nil {
-        return false, false
-    }
-    // A goSignals ClientToken carries roles and/or a scope claim. Absent both,
-    // this is an IdP/opaque token we cannot classify here.
-    if len(eat.Roles) == 0 && eat.Scope == "" {
-        return false, false
-    }
-    return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
+	if bearer == "" {
+		return false, false
+	}
+	var eat authSupport.EventAuthToken
+	parser := jwt.NewParser()
+	if _, _, err := parser.ParseUnverified(bearer, &eat); err != nil {
+		return false, false
+	}
+	// A goSignals ClientToken carries roles and/or a scope claim. Absent both,
+	// this is an IdP/opaque token we cannot classify here.
+	if len(eat.Roles) == 0 && eat.Scope == "" {
+		return false, false
+	}
+	return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
+}
+
+// stripTransmitterSupplied returns a copy of reg with the fields the local SUT
+// MUST assign itself cleared, so the CLI never pre-populates them on the wire:
+// stream_id (transmitter-assigned), events_supported / events_delivered
+// (derived from the SUT's static event catalog ∩ events_requested),
+// min_verification_interval and inactivity_timeout (server-side policy). The
+// goSignals-to-goSignals connection flow can carry these from the local
+// receive stream's cached config; valid as local state but illegal on the wire.
+//
+// Iss, Aud, and IssuerJWKSUrl are PRESERVED by default on both paths:
+//   - Transmitter-side (Delivery.method = DeliveryPush/Poll/Sstp): the operator
+//     is asserting them via --iss / --aud / --iss-jwks-url. A goSignals SUT
+//     acting as transmitter MUST honor that intent (without it, the SUT falls
+//     back to its default issuer alias and silently drops the operator's
+//     configured audience — Test4_PollStream depends on this).
+//   - Receiver-side (Delivery.method = Receive*): these describe the FOREIGN
+//     transmitter the local SUT will receive from. The SUT needs Iss /
+//     IssuerJWKSUrl to discover the transmitter's SSF endpoints (verification,
+//     status) for stream management, and Aud as the expected audience to
+//     validate against inbound SETs' aud claim (RFC 8417 §2.2).
+//
+// When the target server is marked StrictSsf (see SsfServer.StrictSsf), the
+// transmitter-side wire body is additionally stripped of Iss/Aud/IssuerJWKSUrl
+// to satisfy SSF §8.1.1.1, which forbids the receiver from supplying these
+// transmitter-owned fields on a publisher-leg POST. Strict transmitters such
+// as the OpenID conformance suite reject the request with HTTP 400 otherwise.
+// Receiver-side bodies are never additionally stripped — they go to the local
+// SUT, which owns its own SSF wire cleanup on outbound calls.
+func stripTransmitterSupplied(reg model.StreamConfiguration, strict bool) model.StreamConfiguration {
+	return model.StripTransmitterSupplied(reg, strict)
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
@@ -901,7 +1103,29 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		return nil, err
 	}
 
-	regBytes, err := json.MarshalIndent(&reg, "", " ")
+	wire := stripTransmitterSupplied(reg, server.StrictSsf)
+
+	// Warn-and-drop: when registering against a strict server (SSF §8.1.1.1)
+	// the publisher-leg POST cannot carry operator-asserted iss/aud — they are
+	// transmitter-owned. If the operator passed --iss/--aud and the strip
+	// actually removed them, tell them so the silent omission isn't surprising.
+	if server.StrictSsf {
+		var dropped []string
+		if reg.Iss != "" && wire.Iss == "" {
+			dropped = append(dropped, "iss")
+		}
+		if len(reg.Aud) > 0 && len(wire.Aud) == 0 {
+			dropped = append(dropped, "aud")
+		}
+		if reg.IssuerJWKSUrl != "" && wire.IssuerJWKSUrl == "" {
+			dropped = append(dropped, "issuerJWKSUrl")
+		}
+		if len(dropped) > 0 {
+			fmt.Printf("Warning: server %q is marked strict-ssf; dropping transmitter-owned value(s) %s from the registration request (SSF §8.1.1.1)\n", server.Alias, strings.Join(dropped, ", "))
+		}
+	}
+
+	regBytes, err := json.MarshalIndent(&wire, "", " ")
 	if err != nil {
 		return nil, err
 	}
@@ -910,6 +1134,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	bearer, err := serverBearer(&cli.Globals, server)
 	if err != nil {
 		return nil, err
@@ -931,6 +1156,12 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		return nil, fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
 	}
 
+	// Accept aud as either a single string or a string array (RFC 7519 §4.1.3
+	// allows both). Foreign SSF transmitters (e.g. the OpenID conformance
+	// suite) return a single string; our model is []string. Normalize before
+	// unmarshal so a string aud doesn't crash the parse.
+	body = normalizeJWTAud(body)
+
 	var config model.StreamConfiguration
 	err = json.Unmarshal(body, &config)
 	if err != nil {
@@ -938,9 +1169,9 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	}
 
 	if streamAlias == "" {
-		streamAlias = generateAlias(3)
+		streamAlias = authSupport.GenerateAlias(3)
 		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
-			streamAlias = generateAlias(3)
+			streamAlias = authSupport.GenerateAlias(3)
 		}
 	}
 
@@ -991,14 +1222,206 @@ type CreateStreamPushCmd struct {
 	Connection CreatePushConnectionCmd `cmd:"" aliases:"c" help:"Create a push stream connection between servers"`
 }
 
+// CreateStreamSstpCmd provisions an SSTP pair (PRD #154 Q44, slice #170) with a
+// single invocation. It is issued against the <client-alias> side (the SSTP HTTP
+// client, role=initiator); that node's StreamService cascades the mirrored
+// bootstrap to <server-alias> via the stored Server credentials (slice #161).
+//
+// Two input shapes:
+//   - Symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode) build a
+//     symmetric SstpPairBootstrap: identical business-plane inputs both
+//     directions.
+//   - --bootstrap-file <file> (JSON or YAML) supplies a full SstpPairBootstrap
+//     for the asymmetric / multi-hop case (per-direction Primary/Inbound). It is
+//     named --bootstrap-file (not --config) because the global --config flag
+//     (GOSIGNALS_HOME) already owns that name.
+//
+// The two shapes are mutually exclusive.
+type CreateStreamSstpCmd struct {
+	ClientAlias    string   `arg:"" required:"" help:"Alias of the SSTP client (initiator) server to provision the pair against."`
+	ServerAlias    string   `arg:"" required:"" help:"Alias of the SSTP server (responder) peer; its stored credentials cascade the mirrored half."`
+	Name           string   `optional:"" help:"An alias name for the pair to be stored locally."`
+	Description    string   `optional:"" help:"Human-facing label copied onto both halves of the pair."`
+	BootstrapFile  string   `name:"bootstrap-file" optional:"" help:"Path to a JSON/YAML file carrying a full (asymmetric) SstpPairBootstrap. Mutually exclusive with the symmetric flags."`
+	Iss            string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
+	IssJwksUrl     string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
+	Aud            []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
+	Events         []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode). Each value is a case-insensitive regular expression with '*' as shorthand for '.*'."`
+	Mode           string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
+	AllowPlaintext bool     `name:"allow-plaintext" optional:"" help:"Opt the pair out of the business-stream TLS floor so the initiator may dial a plaintext http:// peer (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
+}
+
+func (p *CreateStreamSstpCmd) Run(cli *CLI) error {
+	flagsUsed := p.Iss != "" || p.IssJwksUrl != "" || len(p.Aud) > 0 || len(p.Events) > 0 || p.Mode != ""
+	if p.BootstrapFile != "" && flagsUsed {
+		return errors.New("--bootstrap-file cannot be combined with the symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode); use one input mode")
+	}
+
+	var boot model.SstpPairBootstrap
+	if p.BootstrapFile != "" {
+		loaded, err := loadSstpBootstrapFile(p.BootstrapFile)
+		if err != nil {
+			return err
+		}
+		boot = *loaded
+	} else {
+		boot = model.SstpPairBootstrap{
+			Description:      p.Description,
+			TxAllowPlaintext: p.AllowPlaintext,
+			Primary: model.SstpDirection{
+				Iss:        p.Iss,
+				IssJwksUrl: p.IssJwksUrl,
+				Aud:        p.Aud,
+				Events:     p.Events,
+				Mode:       p.Mode,
+			},
+			Inbound: model.SstpDirection{
+				Iss:        p.Iss,
+				IssJwksUrl: p.IssJwksUrl,
+				Aud:        p.Aud,
+				Events:     p.Events,
+				Mode:       p.Mode,
+			},
+		}
+	}
+
+	// The issuing client side plays initiator; the named server alias is the
+	// peer the StreamService cascades the mirror to.
+	boot.Role = model.SstpRoleInitiator
+	boot.PeerServerAlias = p.ServerAlias
+	if p.Description != "" {
+		boot.Description = p.Description
+	}
+
+	server, err := cli.Data.GetServer(p.ClientAlias)
+	if err != nil {
+		return err
+	}
+
+	jsonString, _ := json.MarshalIndent(boot, "", "  ")
+	fmt.Println(fmt.Sprintf("Create SSTP pair on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, string(jsonString)))
+	if !ConfirmProceed("") {
+		return nil
+	}
+
+	return cli.executeCreateSstpPair(p.Name, boot, server)
+}
+
+// loadSstpBootstrapFile reads an SstpPairBootstrap from a JSON or YAML file. A
+// `.yaml`/`.yml` extension selects YAML; anything else is parsed as JSON.
+func loadSstpBootstrapFile(path string) (*model.SstpPairBootstrap, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read --bootstrap-file %s: %w", path, err)
+	}
+	var boot model.SstpPairBootstrap
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".yaml" || ext == ".yml" {
+		if err = yaml.Unmarshal(data, &boot); err != nil {
+			return nil, fmt.Errorf("unable to parse YAML --bootstrap-file %s: %w", path, err)
+		}
+	} else {
+		if err = json.Unmarshal(data, &boot); err != nil {
+			return nil, fmt.Errorf("unable to parse JSON --bootstrap-file %s: %w", path, err)
+		}
+	}
+	return &boot, nil
+}
+
+// executeCreateSstpPair POSTs an SstpPairBootstrap body to the client node's
+// stream-configuration endpoint, authenticated with the node's bearer, parses
+// the returned StreamStateRecord, stores a local stream alias, and prints the
+// PairId, both pair SIDs, and the resolved EndpointUrls.
+func (cli *CLI) executeCreateSstpPair(streamAlias string, boot model.SstpPairBootstrap, server *SsfServer) error {
+	serverUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	regUrl, err := serverUrl.Parse(server.ServerConfiguration.ConfigurationEndpoint)
+	if err != nil {
+		return err
+	}
+
+	bootBytes, err := json.MarshalIndent(&boot, "", " ")
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bootBytes))
+	if err != nil {
+		return err
+	}
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	} else {
+		fmt.Println("No server credential detected. Run 'login " + server.Alias + "' or attempt anonymous request...")
+	}
+
+	client := getHttpClient(0)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
+	}
+
+	var record model.StreamStateRecord
+	if err = json.Unmarshal(body, &record); err != nil {
+		return err
+	}
+
+	txSid := record.PairId
+	if txSid == "" {
+		txSid = record.StreamConfiguration.Id
+	}
+	rxSid := ""
+	if record.SstpInbound != nil {
+		rxSid = record.SstpInbound.Id
+	}
+	localEndpoint := ""
+	peerPairId := ""
+	if record.SstpMethod != nil {
+		localEndpoint = record.SstpMethod.EndpointUrl
+		peerPairId = record.SstpMethod.PeerPairId
+	}
+
+	if streamAlias == "" {
+		streamAlias = authSupport.GenerateAlias(3)
+		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
+			streamAlias = authSupport.GenerateAlias(3)
+		}
+	}
+	stream := Stream{
+		Alias:       streamAlias,
+		Id:          txSid,
+		Description: "SSTP Pair",
+		Iss:         record.StreamConfiguration.Iss,
+		Endpoint:    localEndpoint,
+		IssJwksUrl:  record.StreamConfiguration.IssuerJWKSUrl,
+	}
+	server.Streams[streamAlias] = stream
+
+	fmt.Println(fmt.Sprintf("SSTP pair created:\n  PairId:       %s\n  txSid:        %s\n  rxSid:        %s\n  EndpointUrl:  %s\n  PeerPairId:   %s", record.PairId, txSid, rxSid, localEndpoint, peerPairId))
+
+	return cli.Data.Save(&cli.Globals)
+}
+
 type CreateStreamCmd struct {
 	Push       CreateStreamPushCmd `cmd:"" help:"Create a SET PUSH Stream (RFC8935)"`
 	Poll       CreateStreamPollCmd `cmd:"" help:"Create a SET Polling Stream (RFC8936)"`
+	Sstp       CreateStreamSstpCmd `cmd:"" help:"Create an SSTP bidirectional pair (draft-hunt-secevent-sstp)"`
 	Aud        []string            `optional:"" sep:"," help:"One or more audience values separated by commas"`
 	Iss        string              `optional:"" help:"The event issuer value (e.g. scim.example.com)"`
 	Name       string              `optional:"" short:"n" help:"An alias name for the stream to be created"`
 	IssJwksUrl string              `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
-	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
+	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Each value is a case-insensitive regular expression matched anywhere in an event uri, with '*' as shorthand for '.*' -- e.g. '*:event:prov:*' or '*:event:(feed|sig):*'. Omit for all supported events."`
 }
 
 // bootstrapBearer returns the bearer to present on bootstrap-capable calls
@@ -1018,6 +1441,7 @@ type CreateKeyCmd struct {
 	IssuerId string `arg:"" required:"" help:"The issuer value associated with the key (e.g. example.com)"`
 	File     string `optional:"" default:"issuer.pem" help:"Specify the file where the issued PEM is to be stored (default is issuer.pem)"`
 	Force    string `optional:"" help:"Force creation of the key even if it already exists (replace or rotate)."`
+	Alg      string `optional:"" help:"The signature algorithm of the key to create, rotate or replace: RS256, ES256 or ML-DSA-65; default is the server's I2SIG_KEY_ALG (ES256). Keys of other algorithms are left alone."`
 }
 
 func (c *CreateKeyCmd) Run(g *Globals) error {
@@ -1025,13 +1449,28 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	if err != nil {
 		return err
 	}
-	hostUrl, _ := url.Parse(server.Host)
-	certUrl := hostUrl.JoinPath("/key", c.IssuerId)
-	if c.Force != "" {
-		q := certUrl.Query()
-		q.Set("force", c.Force)
-		certUrl.RawQuery = q.Encode()
+	hostUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
 	}
+	// An SSF issuer id can be a full URL with a path component (a path-bearing
+	// local issuer, ADR 0023 / GH #188). url.JoinPath would leave its slashes
+	// literal (and collapse "//"), so the /key/{keyName} route would capture only
+	// the first segment. Percent-encode the issuer id so the whole value rides in
+	// a single path segment: the server runs with UseEncodedPath() and the
+	// CreateKey handler url.QueryUnescape's it back, so QueryEscape is the
+	// matching pair. A slash-free issuer id (e.g. example.com) encodes to itself.
+	certUrl := *hostUrl
+	certUrl.Path = "/key/" + c.IssuerId
+	certUrl.RawPath = "/key/" + url.QueryEscape(c.IssuerId)
+	q := certUrl.Query()
+	if c.Force != "" {
+		q.Set("force", c.Force)
+	}
+	if c.Alg != "" {
+		q.Set("alg", c.Alg)
+	}
+	certUrl.RawQuery = q.Encode()
 	req, _ := http.NewRequest(http.MethodPost, certUrl.String(), nil)
 	if bearer := bootstrapBearer(server.ClientToken); bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
@@ -1050,10 +1489,14 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
 	}
 
+	// The stored PEM is the issuer key `generate event` signs with: the newest
+	// created key of any type (spec #114). generate event signs with the key's
+	// own type and asks the server for its kid, so no kid is kept here.
 	if g.Data.Pems == nil {
 		g.Data.Pems = map[string][]byte{}
 	}
 	g.Data.Pems[c.IssuerId] = body
+	delete(g.Data.keys, c.IssuerId) // drop the parsed key cached for the old PEM
 
 	outputPath := "issuer.pem"
 	if c.File != "" {
@@ -1063,6 +1506,9 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	// file, err := os.OpenFile(cli.Output, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	err = os.WriteFile(outputPath, body, 0640)
 	if err != nil {
+		fmt.Println(err.Error())
+	}
+	if err = services.WriteKidSidecar(outputPath, resp.Header.Get(services.KeyIdHeader), 0640); err != nil {
 		fmt.Println(err.Error())
 	}
 	fmt.Println("Certificate received (PEM):\n" + string(body))
@@ -1516,7 +1962,9 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
+	// SSF 1.0 §8.1.5 Stream Configuration Delete answers 204 No Content on
+	// success; tolerate a 200 OK as well for transmitters that still return it.
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return errors.New(fmt.Sprintf("Error completing delete request: %s", resp.Status))
 	}
 	if _, ok := cli.Data.streamConfigs[stream.Alias]; ok {
@@ -1665,9 +2113,10 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	}
 
 	updateStatus := model.UpdateStreamStatus{
-		Status:  setStatus,
-		Subject: nil,
-		Reason:  cleanQuotes(s.Reason),
+		StreamId: stream.Id,
+		Status:   setStatus,
+		Subject:  nil,
+		Reason:   cleanQuotes(s.Reason),
 	}
 
 	bodyBytes, err := json.MarshalIndent(updateStatus, "", " ")
@@ -1675,6 +2124,7 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	bearer, err := serverBearer(&cli.Globals, server)
 	if err != nil {
 		return err
@@ -1709,9 +2159,239 @@ type SetStreamCmd struct {
 	Config SetStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"Modify stream configuration"`
 }
 
+// SetKeyStatusCmd is a thin wrapper over POST /key/{keyName}/status: it sets the
+// lifecycle status (active|suspended|revoked) of an issuer key. Unlike a delete,
+// the key material and audit trail are retained (community ADR 0028). Omitting
+// --kid applies the transition to every record under the keyName.
+type SetKeyStatusCmd struct {
+	Alias   string `arg:"" required:"" help:"The alias of the server holding the key."`
+	KeyName string `arg:"" required:"" help:"The keyName / issuer whose key status is being changed."`
+	Status  string `required:"" short:"m" enum:"active,suspended,revoked,a,s,r" help:"New status: active, suspended, or revoked."`
+	Kid     string `optional:"" help:"Restrict the change to a single kid; omit to affect all records under the keyName."`
+}
+
+func (c *SetKeyStatusCmd) Run(cli *CLI) error {
+	status := c.Status
+	switch c.Status {
+	case "a", "active":
+		status = "active"
+	case "s", "suspended":
+		status = "suspended"
+	case "r", "revoked":
+		status = "revoked"
+	}
+
+	server, err := cli.Data.GetServer(c.Alias)
+	if err != nil {
+		return err
+	}
+	hostUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	// Percent-encode the keyName into a single path segment (matches the
+	// CreateKey addressing convention, ADR 0023): the server runs with
+	// UseEncodedPath() and url.QueryUnescape's it back.
+	statusUrl := *hostUrl
+	statusUrl.Path = "/key/" + c.KeyName + "/status"
+	statusUrl.RawPath = "/key/" + url.QueryEscape(c.KeyName) + "/status"
+
+	reqBody := model.SetKeyStatusRequest{Status: status, Kid: c.Kid}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, statusUrl.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	} else {
+		fmt.Println(fmt.Sprintf("No admin token for %s; request will likely be rejected.", server.Alias))
+	}
+
+	client := getHttpClient(0)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(respBytes))
+	}
+
+	fmt.Println("Updated key status:")
+	fmt.Println(string(respBytes))
+
+	var parsed struct {
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(respBytes, &parsed); err == nil && parsed.Warning != "" {
+		fmt.Println("WARNING: " + parsed.Warning)
+	}
+	return nil
+}
+
+type SetKeyCmd struct {
+	Status SetKeyStatusCmd `cmd:"" help:"Set the lifecycle status (active|suspended|revoked) of an issuer key."`
+}
+
 type SetCmd struct {
 	Stream        SetStreamCmd        `cmd:"" help:"Change settings on a stream"`
+	Key           SetKeyCmd           `cmd:"" help:"Change the lifecycle status of an issuer key (revoke/suspend/reactivate)."`
 	SubjectFilter SetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Change a stream's subject-filter configuration."`
+}
+
+// PatchStreamConfigCmd issues a non-interactive PATCH against the transmitter's
+// stream-configuration endpoint (SSF §8.1.1.3). It carries only the
+// Receiver-Supplied fields the caller explicitly set; all other fields are
+// omitted so the transmitter applies a true partial update. Transmitter-
+// Supplied fields are stripped (see stripTransmitterSupplied).
+type PatchStreamConfigCmd struct {
+	Alias       string   `arg:"" help:"Alias of stream to be patched"`
+	Description string   `optional:"" help:"Set the description"`
+	Events      []string `optional:"" short:"e" sep:"," help:"Replace events_requested with this list"`
+	RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
+	Format      string   `optional:"" short:"f" help:"Set the subject format"`
+}
+
+func (p *PatchStreamConfigCmd) Run(cli *CLI) error {
+	return sendStreamMutation(cli, http.MethodPatch, p.Alias, p.Description, p.Events, p.RJwksUrl, p.Format, false)
+}
+
+type PatchStreamCmd struct {
+	Config PatchStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PATCH a partial Receiver-Supplied stream config"`
+}
+
+type PatchCmd struct {
+	Stream PatchStreamCmd `cmd:"" help:"Send a partial-update (PATCH) request to a transmitter"`
+}
+
+// ReplaceStreamConfigCmd issues a non-interactive PUT against the transmitter's
+// stream-configuration endpoint (SSF §8.1.1.4). It sends the full
+// Receiver-Supplied set: any fields not provided on the command line fall back
+// to the locally-cached stream config so the replace is well-formed. Used by
+// the conformance receiver-plan driver to exercise the replace path.
+type ReplaceStreamConfigCmd struct {
+	Alias       string   `arg:"" help:"Alias of stream to be replaced"`
+	Description string   `optional:"" help:"Set the description (defaults to existing)"`
+	Events      []string `optional:"" short:"e" sep:"," help:"Set events_requested (defaults to existing)"`
+	RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
+	Format      string   `optional:"" short:"f" help:"Set the subject format"`
+}
+
+func (rp *ReplaceStreamConfigCmd) Run(cli *CLI) error {
+	return sendStreamMutation(cli, http.MethodPut, rp.Alias, rp.Description, rp.Events, rp.RJwksUrl, rp.Format, true)
+}
+
+type ReplaceStreamCmd struct {
+	Config ReplaceStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PUT a full Receiver-Supplied stream config"`
+}
+
+type ReplaceCmd struct {
+	Stream ReplaceStreamCmd `cmd:"" help:"Send a full-replace (PUT) request to a transmitter"`
+}
+
+// sendStreamMutation builds and sends a PATCH or PUT against
+// server.ConfigurationEndpoint?stream_id=<id> for the local alias's remote
+// stream. The body is a map[string]any populated ONLY with fields the caller
+// explicitly provided plus the required stream_id; this avoids serializing
+// zero-valued struct fields (notably events_requested: null, which strict
+// transmitters reject — the OpenID conformance suite's gson maps null into
+// JsonNull and a JsonArray cast then throws ClassCastException). For PUT
+// (full-replace) callers SHOULD pass every field they want set; missing
+// fields will not be sent on the wire. No interactive prompt: this is meant
+// to be driven from scripts.
+func sendStreamMutation(cli *CLI, method, alias, description string, events []string, rJwks, format string, inheritFromCache bool) error {
+	streamConfig, server := cli.Data.GetStreamAndServer(alias)
+	if streamConfig == nil {
+		return fmt.Errorf("stream alias %q not found", alias)
+	}
+	if server == nil || server.ServerConfiguration.ConfigurationEndpoint == "" {
+		return fmt.Errorf("no configuration_endpoint known for server hosting stream %q", alias)
+	}
+
+	body := map[string]any{"stream_id": streamConfig.Id}
+	// PUT (replace) seeds Receiver-Supplied fields from the cached config so
+	// unset flags carry through, matching SSF §8.1.1.4 full-replace semantics.
+	// PATCH (inheritFromCache=false) sends only explicitly-set fields.
+	if inheritFromCache {
+		cached, err := cli.Data.GetStreamConfig(alias)
+		if err != nil {
+			return fmt.Errorf("could not load cached stream config for %q: %w", alias, err)
+		}
+		if cached.Description != "" {
+			body["description"] = cached.Description
+		}
+		if len(cached.EventsRequested) > 0 {
+			body["events_requested"] = cached.EventsRequested
+		}
+		if cached.ReceiverJWKSUrl != "" {
+			body["receiverJWKSUrl"] = cached.ReceiverJWKSUrl
+		}
+		if cached.Format != "" {
+			body["format"] = cached.Format
+		}
+		if cached.Delivery != nil {
+			body["delivery"] = cached.Delivery
+		}
+	}
+	if description != "" {
+		body["description"] = description
+	}
+	if len(events) > 0 {
+		body["events_requested"] = events
+	}
+	if rJwks != "" {
+		body["receiverJWKSUrl"] = rJwks
+	}
+	if format != "" {
+		body["format"] = format
+	}
+
+	bodyBytes, err := json.MarshalIndent(body, "", " ")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.ServerConfiguration.ConfigurationEndpoint + "?stream_id=" + streamConfig.Id
+	req, err := http.NewRequest(method, reqUrl, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(respBytes))
+	}
+	cli.Data.ResetStreamConfig(alias)
+	fmt.Printf("%s %s ok (%s)\n", method, alias, resp.Status)
+	if len(respBytes) > 0 {
+		fmt.Println(string(respBytes))
+	}
+	return nil
 }
 
 func ConfirmProceed(msg string) bool {
@@ -1885,7 +2565,7 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 }
 
 func (p *PollCmd) DoPollRequest(ctx context.Context, client *http.Client, params model.PollParameters, endpoint string, token string, exitCh chan struct{}) (*model.PollResponse, error) {
-	bodyBytes, err := json.MarshalIndent(params, "", " ")
+	bodyBytes, err := json.MarshalIndent(wirePollRequest(params), "", " ")
 	if err != nil {
 		return nil, err
 	}
@@ -1924,10 +2604,29 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client *http.Client, params
 	return &pollResponse, nil
 }
 
+// wirePollRequest is the RFC 8936 poll request body for params; it is what
+// puts an AckOnly request on the wire as an explicit "maxEvents": 0.
+func wirePollRequest(params model.PollParameters) goSetPoll.PollRequest {
+	req := goSetPoll.PollRequest{
+		MaxEvents:         params.MaxEvents,
+		AckOnly:           params.AckOnly,
+		ReturnImmediately: params.ReturnImmediately,
+		Acks:              params.Acks,
+		TimeoutSecs:       params.TimeoutSecs,
+	}
+	if len(params.SetErrs) > 0 {
+		req.SetErrs = make(map[string]goSetPoll.SetErrType, len(params.SetErrs))
+		for jti, setErr := range params.SetErrs {
+			req.SetErrs[jti] = goSetPoll.SetErrType{Error: setErr.Error, Description: setErr.Description}
+		}
+	}
+	return req
+}
+
 func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint string, token string, exitCh chan struct{}) {
 	if p.AutoAck && len(p.Acks) > 0 {
 		pollRequest := model.PollParameters{
-			MaxEvents:         0,
+			AckOnly:           true,
 			ReturnImmediately: true,
 			Acks:              p.Acks,
 		}
@@ -1944,6 +2643,76 @@ func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint s
 
 }
 
+// newestActiveKid picks the kid generate event signs with: in the issuer's key
+// summary, the last active keyStates[] entry whose alg is alg. Summaries list
+// keys oldest-first (spec #114 S-ALG), so the last match is that type's newest
+// key. It returns "" when nothing matches, e.g. an older server that reports
+// no alg.
+func newestActiveKid(summaries []dao.KeySummary, issuer, alg string) string {
+	kid := ""
+	for _, summary := range summaries {
+		if summary.KeyName != issuer {
+			continue
+		}
+		for _, state := range summary.KeyStates {
+			if state.Status == "active" && state.Alg == alg {
+				kid = state.Kid
+			}
+		}
+	}
+	return kid
+}
+
+// signingKid asks server (GET /keys) for the kid of issuer's newest active key
+// of type alg. When the server reports none (an older server without alg) or
+// cannot be asked, it falls back to the issuer name, the kid of a legacy first
+// RSA key.
+func signingKid(g *Globals, server *SsfServer, issuer, alg string) string {
+	kid, err := fetchSigningKid(g, server, issuer, alg)
+	if err != nil {
+		fmt.Println(fmt.Sprintf("Could not read the key summary from %s (%s); signing with kid %q.", server.Alias, err.Error(), issuer))
+	}
+	if kid == "" {
+		return issuer
+	}
+	return kid
+}
+
+func fetchSigningKid(g *Globals, server *SsfServer, issuer, alg string) (string, error) {
+	keysUrl, err := url.JoinPath(server.Host, "keys")
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodGet, keysUrl, nil)
+	if err != nil {
+		return "", err
+	}
+	bearer, err := serverBearer(g, server)
+	if err != nil {
+		return "", err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	req.Header.Set("Accept", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return "", err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status response: %s", resp.Status)
+	}
+	var summaries []dao.KeySummary
+	if err = json.Unmarshal(body, &summaries); err != nil {
+		return "", err
+	}
+	return newestActiveKid(summaries, issuer, alg), nil
+}
+
 type GenerateCmd struct {
 	Alias string `arg:"" optional:"" help:"The stream alias of a Push Receiver Stream to submit the event to, otherwise event is displayed to console"`
 	Event string `help:"An event type URI (or the last portion of it) of the event to create"`
@@ -1956,7 +2725,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	var stream *Stream
 	var server *SsfServer
 	var config *model.StreamConfiguration
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var err error
 	var endpoint string
 	var token string
@@ -1991,14 +2760,14 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		SubjectIdentifier: *subjectIdentifier,
 	}, issuer, audience)
 
-	event.TransactionId = bson.NewObjectID().Hex()
+	event.TransactionId = ids.NewV7()
 	switch gen.Event {
 	case "create:full":
 		payload := resource.CreateFullEventPayload(genResource)
-		event.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:full", payload)
+		event.AddEventPayload(model.EventScimCreateFull, payload)
 	case "create:notice":
 		payload := resource.CreateNoticeEventPaylaod(genResource)
-		event.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:notice", payload)
+		event.AddEventPayload(model.EventScimCreateNotice, payload)
 	}
 	if gen.Alias == "" {
 		fmt.Println("Generated Event:")
@@ -2013,8 +2782,14 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 
 	event.IssuedAt = jwt.NewNumericDate(time.Now())
 
-	// Now we sign and deliver the event
-	signString, err := event.JWS(jwt.SigningMethodRS256, key)
+	// Now we sign and deliver the event, with the key's own type and the kid
+	// the server holds for it (spec #114).
+	method, alg, err := services.SigningMethodOf(key)
+	if err != nil {
+		return err
+	}
+	event.Kid = signingKid(&c.Globals, server, config.Iss, alg)
+	signString, err := event.JWS(method, key)
 	if err != nil {
 		return err
 	}
@@ -2404,7 +3179,7 @@ type subjectFilterStatusLookup struct {
 	Found        bool                     `json:"found"`
 	Kind         string                   `json:"kind,omitempty"`
 	CanonicalKey string                   `json:"canonical_key,omitempty"`
-	EnforceAt    time.Time                `json:"enforce_at,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitzero"`
 	Pending      bool                     `json:"pending,omitempty"`
 	Delivers     bool                     `json:"delivers"`
 }

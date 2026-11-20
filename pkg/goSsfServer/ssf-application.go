@@ -9,18 +9,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
-	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/internal/server"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -38,24 +38,24 @@ type SsfApplication struct {
 	SubjectFilterService *services.SubjectFilterService
 	SubjectRelayService  *services.SubjectRelayService
 	Server               *http.Server
-	Handler       http.Handler
-	EventRouter   eventRouter.EventRouter
-	BaseUrl       *url.URL
-	HostName      string
-	DefIssuer     string
-	AdminRole     string
-	Auth          *authUtil.AuthIssuer
-	mu            sync.RWMutex
-	NodeID        string
-	StartedAt     time.Time
+	Handler              http.Handler
+	EventRouter          eventRouter.EventRouter
+	BaseUrl              *url.URL
+	HostName             string
+	DefIssuer            string
+	AdminRole            string
+	Auth                 *authSupport.AuthIssuer
+	mu                   sync.RWMutex
+	NodeID               string
+	StartedAt            time.Time
 }
 
-func (sa *SsfApplication) GetStreamService() *services.StreamService  { return sa.StreamService }
-func (sa *SsfApplication) GetKeyService() *services.KeyService        { return sa.KeyService }
-func (sa *SsfApplication) GetEventService() *services.EventService    { return sa.EventService }
-func (sa *SsfApplication) GetClientService() *services.ClientService  { return sa.ClientService }
-func (sa *SsfApplication) GetServerService() *services.ServerService  { return sa.ServerService }
-func (sa *SsfApplication) GetTokenService() *services.TokenService    { return sa.TokenService }
+func (sa *SsfApplication) GetStreamService() *services.StreamService { return sa.StreamService }
+func (sa *SsfApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
+func (sa *SsfApplication) GetEventService() *services.EventService   { return sa.EventService }
+func (sa *SsfApplication) GetClientService() *services.ClientService { return sa.ClientService }
+func (sa *SsfApplication) GetServerService() *services.ServerService { return sa.ServerService }
+func (sa *SsfApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
 func (sa *SsfApplication) GetSubjectFilterService() *services.SubjectFilterService {
 	return sa.SubjectFilterService
 }
@@ -69,7 +69,7 @@ func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
 	return sa.EventRouter
 }
 
-func (sa *SsfApplication) GetAuth() *authUtil.AuthIssuer {
+func (sa *SsfApplication) GetAuth() *authSupport.AuthIssuer {
 	if sa.KeyService == nil {
 		return sa.Auth
 	}
@@ -86,7 +86,64 @@ func (sa *SsfApplication) GetDefIssuer() string {
 	return sa.DefIssuer
 }
 
+// ProvisionStrictMode prepares the standalone goSsfServer to act as a
+// strict-spec SSF transmitter — the way an administrator stands up a true SSF
+// server and the OpenID conformance suite expects one. main invokes it on
+// startup when services.StrictSsfEnabled() is true; the returned error MUST be
+// treated as fatal, because the server must not begin advertising an issuer it
+// cannot sign for. This posture is scoped to goSsfServer (the SSF-server
+// simulator) and does not alter the stream-management API. See ADR 0025.
+//
+// It does two things:
+//
+//  1. Requires an administrator-declared issuer. I2SIG_ISSUER_DEFAULT must be set
+//     to an absolute http(s) URL. The base-URL / "DEFAULT" fallback that the
+//     default mode accepts is refused — in strict mode the operator declares the
+//     issuer explicitly, the way the conformance harness configures it.
+//
+//  2. Idempotently provisions that issuer's SET-signing key
+//     (KeyService.EnsureSigningKey) so the issuer-specific discovery endpoint
+//     (/.well-known/ssf-configuration/<path>, RFC 8615 path insertion) resolves,
+//     /jwks/<path> serves the public keyset, and emitted SETs are signed under the
+//     same issuer. This binds iss == discovery issuer == JWKS key name (ADR 0023)
+//     and is restart-safe (unlike InitializeTokenKey, which seeds the issuer key
+//     only on first init).
+func (sa *SsfApplication) ProvisionStrictMode(ctx context.Context) error {
+	issuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", "I2SIG_ISSUER")
+	if issuer == "" || issuer == "DEFAULT" {
+		return fmt.Errorf("strict SSF mode (I2SIG_STRICT_SSF) requires I2SIG_ISSUER_DEFAULT to be set to the transmitter's issuer URL; refusing the base-URL / DEFAULT fallback")
+	}
+	u, err := url.Parse(issuer)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("strict SSF mode: I2SIG_ISSUER_DEFAULT %q must be an absolute http(s) issuer URL", issuer)
+	}
+	if sa.KeyService == nil {
+		return fmt.Errorf("strict SSF mode: key service unavailable, cannot provision issuer %q", issuer)
+	}
+
+	// DefIssuer is resolved from the same lookup in NewApplication; provisioning
+	// the key under it guarantees the key name matches exactly what discovery
+	// advertises and what WellKnownSsfConfigurationIssuerGet reconstructs.
+	created, err := sa.KeyService.EnsureSigningKey(ctx, sa.DefIssuer, "")
+	if err != nil {
+		return fmt.Errorf("strict SSF mode: provisioning signing key for issuer %q: %w", sa.DefIssuer, err)
+	}
+
+	serverLog.Info("Strict SSF transmitter mode enabled",
+		"issuer", sa.DefIssuer,
+		"signing_key_created", created)
+	return nil
+}
+
 func (sa *SsfApplication) CloseReceiver(_ string) {
+	// SSF-only server does not implement receivers
+}
+
+func (sa *SsfApplication) DrainReceiver(_ string) {
+	// SSF-only server does not implement receivers
+}
+
+func (sa *SsfApplication) CascadeReceiverStreamDelete(_ context.Context, _ *model.StreamStateRecord) {
 	// SSF-only server does not implement receivers
 }
 
@@ -199,8 +256,8 @@ func (sa *SsfApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request)
 	server.JwksJsonIssuerHandler(sa, w, r)
 }
 
-func (sa *SsfApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
-	server.DeleteJwksIssuerKeyHandler(sa, w, r)
+func (sa *SsfApplication) SetKeyStatus(w http.ResponseWriter, r *http.Request) {
+	server.SetKeyStatusHandler(sa, w, r)
 }
 
 func (sa *SsfApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +350,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		Coordinator:          persistence.Coordinator,
 		SubjectFilterService: persistence.SubjectFilterService,
 		PushDelivery:         delivery.NewHTTPAdapter(persistence.StreamService, nil),
+		// goSsfServer serves its own POST /poll/{id}, one node per store, so it
+		// is always the poll-transmitter lease owner (#365).
+		ServesClaims: true,
 	}, nodeID)
 
 	var baseUrl *url.URL
@@ -425,13 +485,20 @@ func (sa *SsfApplication) Shutdown() {
 		_ = sa.Server.Shutdown(context.Background())
 	}
 
-	time.Sleep(time.Second)
+	// Graceful drain, configurable via I2SIG_SHUTDOWN_DRAIN (see
+	// server.ResolveShutdownDrain); 0 disables it for tests.
+	drain := server.ResolveShutdownDrain()
+	if drain > 0 {
+		time.Sleep(drain)
+	}
 
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
 
 	// Give some time to ensure all ops are finished.
-	time.Sleep(time.Second)
+	if drain > 0 {
+		time.Sleep(drain)
+	}
 
 	// Shutdown the provider
 	if sa.Storage != nil {

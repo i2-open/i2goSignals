@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -42,9 +42,10 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -55,7 +56,7 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -73,10 +74,10 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	finalCount := atomic.LoadInt32(&pollCount)
 	t.Logf("Poll count after 100ms: %d", finalCount)
 
-	// Check that it's in Pause state
+	// Check that it's retrying: enabled with a reason, not paused (#310)
 	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
+	assert.Equal(t, model.StreamStateEnabled, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized")
 
 	// If it's a tight loop, the count will be very high (hundreds or thousands)
@@ -113,9 +114,10 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized-retry"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -126,7 +128,7 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -144,10 +146,11 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	finalCount := atomic.LoadInt32(&pollCount)
 	t.Logf("Poll count after 100ms: %d", finalCount)
 
-	// Check that it's in Pause state after the first failure
+	// Check that it's retrying after the first failure: enabled with a reason,
+	// not paused (#310)
 	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
+	assert.Equal(t, model.StreamStateEnabled, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized")
 
 	// Now wait for the second failure which should disable the stream
@@ -157,6 +160,7 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized attempts")
+	assert.False(t, updatedState.TransmitterCaused, "a retry-limit disable is not transmitter-caused (#310)")
 
 	finalCount = atomic.LoadInt32(&pollCount)
 	assert.Equal(t, int32(2), finalCount, "Should have attempted 2 times")
@@ -192,9 +196,10 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized-limit"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -205,7 +210,7 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -267,9 +272,10 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized-default"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -280,7 +286,7 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -301,7 +307,7 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	// Check that it's NOT disabled yet
 	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status, "Should still be in Pause state after 3+ attempts")
+	assert.Equal(t, model.StreamStateEnabled, updatedState.Status, "Should still be retrying (enabled with a reason) after 3+ attempts")
 
 	assert.True(t, finalCount >= 3, "Should have attempted at least 3 times. Count: %d", finalCount)
 }

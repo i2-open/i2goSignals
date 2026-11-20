@@ -7,7 +7,9 @@ GO ?= go
 # pkg/constants/server.go), so bumping it in one place updates both the
 # compiled-in default and every Make-driven build/tag.
 VERSION    := $(shell tr -d '[:space:]' < pkg/constants/version.txt)
-VCS_REF    := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# Full SHA (not --short): the S1 delegation contract (planning#26) fixes the
+# OCI revision label; shared by every docker target.
+VCS_REF    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Injected into every Go binary. Overrides the embedded default in
@@ -18,11 +20,22 @@ LDFLAGS     := -X $(VERSION_PKG).GoSignalsVersion=$(VERSION)
 GOFLAGS_BUILD := -trimpath
 GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 
-# Docker image settings. Override on the command line to publish elsewhere:
-#   make build-docker-multiarch REGISTRY=ghcr.io/i2-open IMAGE=i2gosignals
+# Docker image settings. build-publish follows the family's S1 delegation
+# contract (planning#26, rev 2 in planning#135): the pushed refs are exactly
+# $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) and :latest (the dual tag), e.g.
+#   make build-publish REGISTRY=docker.io NAMESPACE=independentid TAG=v0.12.0 PUSH=1
+# (PUSH=yes also pushes; any other PUSH value is a smoke build.)
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
-PUSH_REPO   ?= independentid/i2gosignals
+IMAGE_NAME  := i2gosignals
+# REGISTRY, NAMESPACE and TAG have no defaults. This is a decision of the parent
+# planning spec (planning#26, seam S1): the delegated target is strict and the
+# publisher supplies all three (docker.io / independentid for the family), so a
+# bare PUSH=1 can never push to a namespace nobody named. A push still needs a
+# login with write access.
+REGISTRY    ?=
+NAMESPACE   ?=
+TAG         ?=
 PLATFORMS   ?= linux/amd64,linux/arm64
 BUILDX_BUILDER ?= i2sig
 
@@ -31,6 +44,7 @@ SERVER_DIR  := cmd/goSignalsServer
 CONFIG_DIR  := config
 SCIM_CONFIG := $(CONFIG_DIR)/scim
 BIN_DIR     := bin
+META_DIR    ?= $(BIN_DIR)
 SERVER_BIN  := $(BIN_DIR)/goSignalsServer
 DEV_IMAGE   := i2gosignals-dev:latest
 DEV_IMAGE_STAMP := .dev-image.stamp
@@ -38,11 +52,39 @@ DEV_IMAGE_STAMP := .dev-image.stamp
 # Binaries staged under bin/linux/<arch>/ and copied by the production Dockerfile.
 DOCKER_BINS := goSignals goSignalsServer goSsfServer cluster-monitor genTlsKeys healthcheck
 
-.PHONY: all help build run console-build server-build clean clean-scim dev-clean \
+# --- Quality gate knobs -----------------------------------------------------
+GOFMT ?= gofmt
+
+# The benchmark set that forms the project's performance floor. These four
+# packages carry the hot paths a toolchain or dependency change is most likely
+# to move: SET marshal/parse/sign, event-payload validation, RFC8936 poll
+# request/response encoding, and the long-poll buffer's wait/wake cycle.
+# docs/perf/go127-baseline.md records their numbers and every subsequent
+# change appends a delta row against them. Keep this list and
+# docs/perf/go127-baseline.md in step.
+BENCH_PKGS ?= ./pkg/goSet ./pkg/goSetValidate ./pkg/goSetPoll ./internal/eventRouter/buffer
+
+# `make qa` only needs to prove the benchmarks still compile and run, so one
+# iteration each is enough and keeps the gate fast. Real measurements use a
+# statistically meaningful benchtime -- see docs/perf/go127-baseline.md for
+# the command that produced the recorded numbers.
+BENCHTIME ?= 1x
+
+# Packages run under Go 1.27's goroutine-leak profile by `make leak-check`.
+# These are the ones that own a timer path -- lease heartbeats and push
+# recovery (internal/eventRouter), the long-poll wait (its buffer package),
+# the SSTP dialer's heartbeat and resume timers (internal/server), and the
+# poll/push protocol packages that sit on top of them. A regression that
+# abandons a goroutine on a timer channel nobody will ever send to shows up
+# here and nowhere else in the gate.
+LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... ./internal/server
+
+.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-bench-sweep dev-bench-algs dev-pprof \
     generate-certs check-certs licenses-check \
-    build-docker build-docker-multiarch docker-sbom cross-compile-linux \
+    build-docker build-publish multiarch-push-guard test-publish-contract docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
-    run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals
+    run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals \
+    seams qa fmt-check vet test tidy-check bench leak-check
 
 all: build
 
@@ -51,19 +93,32 @@ help:
 	@echo "  build              - check-certs + console-build + server-build (no docker)"
 	@echo "  console-build      - build the goSignals CLI"
 	@echo "  server-build       - build bin/goSignalsServer"
-	@echo "  run                - build + bring up docker-compose.yml demo cluster"
+	@echo "  run                - bring up the docker-compose.yml demo cluster (published image)"
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
-	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; add PUSH=1 to publish $(PUSH_REPO):$(VERSION) + :latest"
+	@echo "  build-publish      - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) TAG=.. pushes REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG and :latest (all three required)"
+	@echo "  test-publish-contract - assert build-publish matches the S1 delegation contract (make -n; no build)"
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
+	@echo "  bench-stack-up / bench-stack-down / bench-stack-logs - production-image stack for dev-bench (docker-compose-benchmark.yml, no Delve)"
+	@echo "  dev-bench          - end-to-end load/routing benchmark against the dev stack: BENCH_E2E_EVENTS=$(BENCH_E2E_EVENTS) BENCH_E2E_CONCURRENCY=$(BENCH_E2E_CONCURRENCY) BENCH_E2E_ARGS=..."
+	@echo "  dev-bench-sweep    - dev-bench once per client count in BENCH_SWEEP_CLIENTS=$(BENCH_SWEEP_CLIENTS) with Mongo journal counters (see docs/perf/e2e-benchmark.md, Concurrency sweep)"
+	@echo "  dev-bench-algs     - dev-bench once per signing algorithm in BENCH_ALGS=$(BENCH_ALGS), one history row each (see docs/perf/e2e-benchmark.md, Signing algorithms)"
+	@echo "  dev-pprof          - profile a dev-stack node: PPROF_PORT=$(PPROF_PORT) PPROF_KIND=$(PPROF_KIND) PPROF_SECONDS=$(PPROF_SECONDS)"
 	@echo "  clean              - remove build artifacts"
+	@echo "  qa                 - full quality gate: fmt-check test-publish-contract vet tidy-check test leak-check bench"
+	@echo "  fmt-check          - fail if any Go file is not gofmt-clean"
+	@echo "  vet                - go vet ./..."
+	@echo "  test               - go test -race ./..."
+	@echo "  tidy-check         - fail if go mod tidy would change go.mod/go.sum"
+	@echo "  bench              - run the benchmark set (BENCHTIME=$(BENCHTIME))"
 
 # Build and install the command line console gosignals.
 console-build:
-	$(GO) build -ldflags "$(LDFLAGS)" ./$(CONSOLE_DIR)
+	@mkdir -p $(BIN_DIR)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/goSignals ./$(CONSOLE_DIR)
 	$(GO) install -ldflags "$(LDFLAGS)" ./$(CONSOLE_DIR)
 
 # Build the Go server.
@@ -87,15 +142,19 @@ generate-certs:
 # Verify every third-party dependency uses a permissive license (no copyleft or
 # unlicensed code). Run this after changing go.mod, and update
 # THIRD-PARTY-NOTICES.txt to match. Installs google/go-licenses on demand.
+# GOROOT is pinned to the toolchain `go` actually runs: go-licenses tells the
+# standard library apart from third-party code by path prefix against GOROOT,
+# and when GOTOOLCHAIN switches to a downloaded toolchain (GOROOT under the
+# module cache) a stale shell GOROOT makes every stdlib package "unknown".
 licenses-check:
 	@command -v go-licenses >/dev/null 2>&1 || { \
 		echo ">> installing go-licenses..."; \
 		$(GO) install github.com/google/go-licenses@latest; \
 	}
-	@PATH="$$PATH:$$($(GO) env GOPATH)/bin" go-licenses check ./... \
+	@PATH="$$PATH:$$($(GO) env GOPATH)/bin" GOROOT="$$($(GO) env GOROOT)" go-licenses check ./... \
 		--disallowed_types=forbidden,restricted,unknown
 
-# --- Container image targets (formerly in build.sh) -------------------------
+# --- Container image targets ----------------------------------------------
 #
 # The production Dockerfile is a binary-copy distroless image: it expects
 # pre-built per-arch binaries under bin/linux/<arch>/. `cross-compile-linux`
@@ -103,8 +162,8 @@ licenses-check:
 #
 # PLATFORMS controls which architectures are produced. Override on the command
 # line, e.g.
-#   make build-docker-multiarch PLATFORMS=linux/amd64
-#   make build-docker-multiarch PLATFORMS=linux/amd64,linux/arm64,linux/arm/v7
+#   make build-publish PLATFORMS=linux/amd64
+#   make build-publish PLATFORMS=linux/amd64,linux/arm64,linux/arm/v7
 
 # Extract the architecture list from PLATFORMS (linux/amd64,linux/arm64 -> amd64 arm64).
 # `comma` must be defined before use because := expands its RHS immediately.
@@ -113,6 +172,36 @@ ARCHS := $(subst linux/,,$(subst $(comma), ,$(PLATFORMS)))
 
 # Cross-compile every binary the production Dockerfile copies, for every arch
 # in PLATFORMS. For single-arch local builds this is just the host arch.
+#
+# NOT ENABLED — image-payload stripping, recorded here for a later release.
+# Debug information is deliberately retained for the current release.
+#
+# Appending the linker flags `-s` (disable symbol table) and `-w` (disable DWARF
+# generation) to the link step below strips debug metadata from the six staged
+# binaries. Measured on linux/arm64 at v0.12.0-alpha.16:
+#
+#     goSignalsServer   37.5MB -> 29.3MB  (-22%)
+#     goSsfServer       37.5MB -> 29.3MB  (-22%)
+#     goSignals         22.4MB -> 15.7MB  (-30%)
+#     cluster-monitor   20.6MB -> 14.3MB  (-31%)
+#     healthcheck        7.6MB ->  5.3MB  (-31%)
+#     genTlsKeys         6.0MB ->  4.1MB  (-32%)
+#     ------------------------------------------
+#     image payload      131MiB ->  98MiB (-25%)
+#
+# Verified to have no effect on: panic tracebacks (Go resolves those from the
+# pclntab, not DWARF, so function/file/line survive stripping), embedded build
+# info (`go version -m` still reports all 29 deps, so buildx `--sbom=true` and
+# the provenance attestation are unaffected), and the -X version injection in
+# LDFLAGS. The one real loss is source-level debugging (Delve/gdb) against a
+# binary pulled out of the image — which is why this stays off for now.
+#
+# Scoped to this target only. console-build / server-build keep full debug info
+# regardless, and Dockerfile-dev is unaffected either way: it builds from source
+# under `dlv debug` and never reads LDFLAGS.
+#
+# To enable, uncomment and append $(STRIP_LDFLAGS) to -ldflags in the recipe:
+# STRIP_LDFLAGS := -s -w
 cross-compile-linux:
 	@for arch in $(ARCHS); do \
 		outdir=$(BIN_DIR)/linux/$$arch; \
@@ -139,24 +228,58 @@ build-docker: cross-compile-linux
 		.
 	@echo ">> built $(LOCAL_IMAGE):$(VERSION) and $(LOCAL_IMAGE):latest"
 
-# Build a multi-arch image ($(PLATFORMS)) as a single manifest list. A multi-arch
-# manifest cannot be loaded into the local Docker daemon, so by default this
-# target just validates the build (layers stay in the buildx cache). Set PUSH=1
-# to publish to $(PUSH_REPO) with both :$(VERSION) and :latest tags. Needs a
-# buildx builder with the docker-container driver — created on demand if missing.
+# Build a multi-arch image ($(PLATFORMS)) as a single manifest list. This target
+# is the callee side of the family's S1 delegation contract (planning#26, rev 2
+# in planning#135): the planning publisher runs it inside a clean tag clone as
 #
-#   make build-docker-multiarch                # build only, no push
-#   make build-docker-multiarch PUSH=1         # build + push to $(PUSH_REPO)
-#   make build-docker-multiarch PUSH=1 PUSH_REPO=ghcr.io/i2-open/i2gosignals
-ifdef PUSH
-DOCKER_MULTIARCH_OUTPUT := --push --tag $(PUSH_REPO):$(VERSION) --tag $(PUSH_REPO):latest --metadata-file $(BIN_DIR)/build-meta.json
-DOCKER_MULTIARCH_BANNER := pushed $(PUSH_REPO):$(VERSION) and :latest for $(PLATFORMS) (metadata at $(BIN_DIR)/build-meta.json)
+#   make build-publish REGISTRY=docker.io NAMESPACE=independentid \
+#       TAG=v0.12.0 PUSH=1 [PLATFORMS=..] [BUILDX_BUILDER=..] [META_DIR=<abs dir>]
+#
+# PUSH unset (or any value other than 1/yes): build every PLATFORMS arch into the buildx cache; push nothing,
+#   tag nothing (a multi-arch manifest cannot be --load'd into the daemon).
+# PUSH=1 (or yes): REGISTRY (host only), NAMESPACE (namespace only) and TAG are all
+#   required (exit 2 otherwise); the manifest list is pushed under exactly two
+#   refs, $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) and
+#   $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):latest (the dual tag). No other
+#   floating tag (vX.Y) is applied here. buildx metadata (the publisher reads
+#   .["containerimage.digest"]) lands in $(META_DIR)/build-meta-$(IMAGE_NAME).json.
+# TAG also feeds --build-arg VERSION (the OCI version label); VERSION from
+# version.txt feeds ldflags only. Needs a docker-container buildx builder --
+# $(BUILDX_BUILDER) is created on demand if the current one is not.
+# `make test-publish-contract` (part of `make qa`) pins this surface.
+# Push only when PUSH is the single word 1 or yes (surrounding spaces are
+# ignored); anything else (unset, 0, no, multi-word) is a smoke build.
+PUSH_ENABLED := $(if $(word 2,$(strip $(PUSH))),,$(filter 1 yes,$(strip $(PUSH))))
+MULTIARCH_META := $(META_DIR)/build-meta-$(IMAGE_NAME).json
+MULTIARCH_REF  := $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG)
+MULTIARCH_LATEST := $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):latest
+ifneq ($(PUSH_ENABLED),)
+DOCKER_MULTIARCH_OUTPUT := --push --tag $(MULTIARCH_REF) --tag $(MULTIARCH_LATEST) --metadata-file $(MULTIARCH_META)
+DOCKER_MULTIARCH_BANNER := pushed $(MULTIARCH_REF) and $(MULTIARCH_LATEST) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
 else
 DOCKER_MULTIARCH_OUTPUT :=
-DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 to publish to $(PUSH_REPO))
+DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. to publish)
 endif
 
-build-docker-multiarch: cross-compile-linux
+# Contract guard: a PUSH=1 (or yes) call with a missing variable fails before anything
+# is compiled. Prerequisite order alone does not hold under `make -j`, so when
+# build-publish is a goal cross-compile-linux also gets an order-only
+# edge on the guard (other goals, e.g. build-docker, are unaffected). The first
+# line of the failure is the contract's verbatim message; the second suggests a
+# complete invocation.
+MULTIARCH_PUSH_HINT := hint: make build-publish PUSH=1 REGISTRY=docker.io NAMESPACE=independentid TAG=v$(VERSION)
+multiarch-push-guard:
+ifneq ($(PUSH_ENABLED),)
+	@[ -n "$(REGISTRY)" ] || { echo "build-publish: REGISTRY is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(NAMESPACE)" ] || { echo "build-publish: NAMESPACE is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(TAG)" ] || { echo "build-publish: TAG is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+endif
+
+ifneq ($(filter build-publish,$(MAKECMDGOALS)),)
+cross-compile-linux: | multiarch-push-guard
+endif
+
+build-publish: multiarch-push-guard cross-compile-linux
 	@current_driver=$$($(DOCKER) buildx inspect 2>/dev/null | awk '/^Driver:/ {print $$2}'); \
 	if [ "$$current_driver" != "docker-container" ]; then \
 		if ! $(DOCKER) buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
@@ -165,9 +288,10 @@ build-docker-multiarch: cross-compile-linux
 		fi; \
 		$(DOCKER) buildx use $(BUILDX_BUILDER); \
 	fi
+	@mkdir -p $(META_DIR)
 	$(DOCKER) buildx build \
 		--platform $(PLATFORMS) \
-		--build-arg VERSION=$(VERSION) \
+		--build-arg VERSION=$(or $(TAG),$(VERSION)) \
 		--build-arg VCS_REF=$(VCS_REF) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		--provenance=mode=max \
@@ -175,6 +299,71 @@ build-docker-multiarch: cross-compile-linux
 		$(DOCKER_MULTIARCH_OUTPUT) \
 		.
 	@echo ">> $(DOCKER_MULTIARCH_BANNER)"
+
+# Pin the S1 contract from the callee side: a change to build-publish's
+# variables or flags fails here before the planning publisher sees it. Drives
+# `make -n` only (nothing is built or pushed), plus the guard target alone for
+# the exit-2 check, and asserts the local sibling build-docker stays local
+# (--load, host arch only, no --push, no REGISTRY/NAMESPACE ref).
+# META_DIR=/tmp/m is a make -n fixture only: nothing is written there.
+MULTIARCH_CONTRACT_REF  := r/n/i2gosignals:v9.9.9-alpha.1
+MULTIARCH_CONTRACT_LATEST := r/n/i2gosignals:latest
+MULTIARCH_CONTRACT_FULL := REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 META_DIR=/tmp/m
+MULTIARCH_CONTRACT_BARE := REGISTRY= NAMESPACE= TAG=
+# Shell helpers inside the recipe:
+#   dry <vars..>            make -n build-publish with the given vars; prints combined output
+#   pushes <label> <vars..> output must carry exactly two --tags (the contract ref and :latest) and --push
+#   smoke  <label> <vars..> must exit 0 with no --push, no --tag and no guard message
+#   local                   make -n build-docker (with REGISTRY/NAMESPACE set) must --load, carry one
+#                           single-arch --platform, and never --push or reference REGISTRY/NAMESPACE
+# Guard loop: `set -- …; set -- "$$@" "$$v="` appends "$$v=" after the full
+# REGISTRY/NAMESPACE/TAG set; make's last assignment wins, blanking only $$v.
+test-publish-contract:
+	@echo ">> build-publish S1 contract (make -n)"
+	@set -e; \
+	  fail() { echo "ERROR: build-publish S1 contract: $$*" >&2; exit 1; }; \
+	  has() { printf '%s\n' "$$2" | grep -qF -- "$$1"; }; \
+	  dry() { $(MAKE) --no-print-directory -n build-publish "$$@" PLATFORMS=linux/amd64,linux/arm64 2>&1; }; \
+	  pushes() { label=$$1; shift; out="$$(dry "$$@")" || fail "$$label must exit 0: $$out"; \
+	    [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 2 ] || fail "$$label must produce exactly two --tags (:TAG and :latest)"; \
+	    has '--tag $(MULTIARCH_CONTRACT_REF)' "$$out" || fail "$$label missing --tag $(MULTIARCH_CONTRACT_REF)"; \
+	    has '--tag $(MULTIARCH_CONTRACT_LATEST)' "$$out" || fail "$$label missing --tag $(MULTIARCH_CONTRACT_LATEST)"; \
+	    has '--push' "$$out" || fail "$$label must --push"; }; \
+	  smoke() { label=$$1; shift; rc=0; out="$$(dry "$$@")" || rc=$$?; \
+	    [ "$$rc" = 0 ] || fail "$$label must exit 0 (got $$rc): $$out"; \
+	    ! has '--push' "$$out" || fail "$$label must not --push"; \
+	    ! has '--tag' "$$out" || fail "$$label must not --tag"; \
+	    ! has 'is required when PUSH=1' "$$out" || fail "$$label must not fire the push guard"; }; \
+	  pushes "PUSH=1" PUSH=1 $(MULTIARCH_CONTRACT_FULL); \
+	  ! printf '%s\n' "$$out" | grep -Eq -- ':v9\.9([^.]|$$)' || fail "must not tag vX.Y"; \
+	  for want in '--platform linux/amd64,linux/arm64' '--provenance=mode=max' '--sbom=true' \
+	      '--build-arg VERSION=v9.9.9-alpha.1' '--metadata-file /tmp/m/build-meta-i2gosignals.json'; do \
+	    has "$$want" "$$out" || fail "PUSH=1 output missing '$$want'"; \
+	  done; \
+	  pushes "PUSH=yes" PUSH=yes $(MULTIARCH_CONTRACT_FULL); \
+	  smoke "PUSH unset" PUSH= $(MULTIARCH_CONTRACT_BARE); \
+	  smoke "PUSH=0" PUSH=0 $(MULTIARCH_CONTRACT_FULL); \
+	  smoke "PUSH=0 bare" PUSH=0 $(MULTIARCH_CONTRACT_BARE); \
+	  for p in 'no 1' '0 1' 'no yes'; do \
+	    smoke "PUSH='$$p' (bare)" PUSH="$$p" $(MULTIARCH_CONTRACT_BARE); \
+	    smoke "PUSH='$$p' (full)" PUSH="$$p" $(MULTIARCH_CONTRACT_FULL); \
+	  done; \
+	  rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=0 $(MULTIARCH_CONTRACT_BARE) 2>&1)" || rc=$$?; \
+	  [ "$$rc" = 0 ] || fail "PUSH=0 guard must exit 0 (got $$rc): $$msg"; \
+	  ! has 'is required when PUSH=1' "$$msg" || fail "PUSH=0 guard must not fire: $$msg"; \
+	  for v in REGISTRY NAMESPACE TAG; do \
+	    set -- REGISTRY=r NAMESPACE=n TAG=t; set -- "$$@" "$$v="; \
+	    rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=1 "$$@" 2>&1)" || rc=$$?; \
+	    [ "$$rc" = 2 ] || fail "PUSH=1 with empty $$v must exit 2 (got $$rc)"; \
+	    printf '%s\n' "$$msg" | grep -qxF "build-publish: $$v is required when PUSH=1" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
+	  done; \
+	  out="$$($(MAKE) --no-print-directory -n build-docker REGISTRY=r NAMESPACE=n PUSH=1 TAG=v9.9.9-alpha.1 2>&1)" || fail "build-docker must exit 0: $$out"; \
+	  has '--load' "$$out" || fail "build-docker must --load"; \
+	  ! has '--push' "$$out" || fail "build-docker must not --push"; \
+	  ! printf '%s\n' "$$out" | grep -Eq -- '--platform [^ ]*,' || fail "build-docker must not build a multi-arch --platform list"; \
+	  ! printf '%s\n' "$$out" | grep -Eq -- 'r/n/|REGISTRY|NAMESPACE|:v9\.9\.9-alpha\.1' || fail "build-docker must not reference REGISTRY/NAMESPACE/TAG"; \
+	  ! $(MAKE) --no-print-directory -n build-docker-multiarch >/dev/null 2>&1 || fail "build-docker-multiarch must not exist (renamed build-publish, no alias)"; \
+	  echo ">> build-publish S1 contract: OK"
 
 # Export the image SBOM to a local file. BuildKit's tar exporter writes the
 # SBOM as sbom.spdx.json at the archive root; stream the archive and extract
@@ -227,8 +416,7 @@ dev-rebuild: dev-build-image
 clean-scim:
 	rm -f -v $(SCIM_CONFIG)/*.pem $(SCIM_CONFIG)/*.jwt $(SCIM_CONFIG)/*.env $(SCIM_CONFIG)/config.json $(SCIM_CONFIG)/data1/*.pem $(SCIM_CONFIG)/data2/*.pem $(SCIM_CONFIG)/data1/*.j* $(SCIM_CONFIG)/data2/*.j*
 
-run-spiffe-demo:
-	$(MAKE) dev-build-image
+run-spiffe-demo: check-certs
 	$(DOCKER) compose -f docker-compose-spiffe.yml up -d
 
 dev-reset-spiffe:
@@ -249,11 +437,191 @@ dev-down:
 dev-logs:
 	$(DOCKER) compose -f docker-compose-dev.yml logs -f goSignals1
 
+# Benchmark stack: the production image (no Delve, no source bind mount),
+# WARN logging, two goSignals nodes and the Mongo replica set only. Shares
+# host ports with the dev stack, so `make dev-down` first. `make dev-bench`
+# targets it unchanged (same localhost ports, same bootstrap token).
+# BENCH_CLUSTER=1 adds goSignals1b, a second member of goSignals1's cluster
+# (host port 8887); pair it with BENCH_E2E_ARGS="--gs1b=https://localhost:8887".
+BENCH_CLUSTER ?=
+BENCH_COMPOSE  = $(DOCKER) compose -f docker-compose-benchmark.yml $(if $(BENCH_CLUSTER),--profile cluster,)
+bench-stack-up: check-certs build-docker
+	$(BENCH_COMPOSE) up -d --wait
+
+bench-stack-down:
+	$(DOCKER) compose -f docker-compose-benchmark.yml --profile cluster down
+
+bench-stack-logs:
+	$(BENCH_COMPOSE) logs -f goSignals1 goSignals2 $(if $(BENCH_CLUSTER),goSignals1b,)
+
+# End-to-end benchmark of the dev stack (cmd/goSignalsBench).
+# Builds push + poll streams between goSignals1 and goSignals2, pushes
+# BENCH_E2E_EVENTS SETs into a goSignals1 receiver and measures ingest and
+# downstream delivery. Results land in bin/bench/; pass BENCH_E2E_ARGS="--pprof"
+# to capture CPU profiles of both nodes (needs the dev-stack pprof listeners), or
+# BENCH_E2E_ARGS="--history docs/perf/e2e-history.md" to record the run.
+# See docs/perf/e2e-benchmark.md.
+BENCH_E2E_EVENTS      ?= 5000
+BENCH_E2E_CONCURRENCY ?= 16
+BENCH_E2E_ARGS        ?=
+dev-bench:
+	$(GO) run ./cmd/goSignalsBench --events=$(BENCH_E2E_EVENTS) --concurrency=$(BENCH_E2E_CONCURRENCY) $(BENCH_E2E_ARGS)
+
+# Concurrency sweep (docs/perf/e2e-benchmark.md, "Concurrency sweep"): one
+# dev-bench run per client count, each snapshotting the Mongo primary's
+# wiredTiger.log journal counters before and after (BENCH_MONGO_URI, host-side;
+# the dev replica set advertises mongo1..3, which must resolve to 127.0.0.1).
+# The server-side worker axis is set when the stack is started; record it with
+# BENCH_SWEEP_WORKERS so each JSON result carries it. Profiles: add
+# BENCH_E2E_ARGS="--pprof --pprof-block" (block needs I2SIG_PPROF_BLOCK_RATE).
+BENCH_SWEEP_CLIENTS ?= 1 4 16 64
+BENCH_SWEEP_WORKERS ?= default
+BENCH_MONGO_URI     ?= mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&authSource=admin
+dev-bench-sweep:
+	@for c in $(BENCH_SWEEP_CLIENTS); do \
+		$(MAKE) --no-print-directory dev-bench BENCH_E2E_CONCURRENCY=$$c \
+			BENCH_E2E_ARGS="--mongo-uri='$(BENCH_MONGO_URI)' --workers=$(BENCH_SWEEP_WORKERS) --label=sweep-c$$c-w$(BENCH_SWEEP_WORKERS) $(BENCH_E2E_ARGS)" || exit 1; \
+	done
+
+# Signing-algorithm comparison (docs/perf/e2e-benchmark.md, "Signing
+# algorithms"): one dev-bench run per algorithm in BENCH_ALGS against the same
+# stack, same events and client count, so the rows differ only in what the
+# transmitter streams sign with. Every SET is signed once per outbound leg, so
+# the algorithm is a first-order term in goSignals1's CPU. Rows land in
+# BENCH_HISTORY labelled algs-<alg>-c<clients>; extra flags go in BENCH_E2E_ARGS
+# (for example --durability=local).
+BENCH_ALGS    ?= RS256 ES256
+BENCH_HISTORY ?= docs/perf/e2e-history.md
+dev-bench-algs:
+	@for a in $(BENCH_ALGS); do \
+		$(MAKE) --no-print-directory dev-bench \
+			BENCH_E2E_ARGS="--signing-alg=$$a --mongo-uri='$(BENCH_MONGO_URI)' --history=$(BENCH_HISTORY) --label=algs-$$a-c$(BENCH_E2E_CONCURRENCY) $(BENCH_E2E_ARGS)" || exit 1; \
+	done
+	@echo ">> last $(words $(BENCH_ALGS)) rows of $(BENCH_HISTORY):"; tail -n $(words $(BENCH_ALGS)) $(BENCH_HISTORY)
+
+# Profile a running dev-stack node with `go tool pprof`.
+# The dev compose file sets I2SIG_PPROF_ADDR=:6060 on every goSignals node and
+# publishes it on host ports 6060 (goSignals1), 6061 (goSignals2), 6062 (goSsfServer).
+#   PPROF_KIND    profile | heap | goroutine | allocs | block | mutex | trace
+#   PPROF_SECONDS sampling window for the cpu `profile` and `trace` kinds
+# Examples:
+#   make dev-pprof                                   # 30s CPU profile of goSignals1, interactive
+#   make dev-pprof PPROF_KIND=heap PPROF_PORT=6061   # heap of goSignals2
+#   make dev-pprof PPROF_UI=1                        # open the web UI on :8081
+# Profiles are saved under bin/pprof/ so they can be re-opened with `go tool pprof`.
+PPROF_PORT    ?= 6060
+PPROF_KIND    ?= profile
+PPROF_SECONDS ?= 30
+PPROF_UI      ?=
+PPROF_UI_ADDR ?= localhost:8081
+PPROF_DIR     := $(BIN_DIR)/pprof
+dev-pprof:
+	@mkdir -p $(PPROF_DIR)
+	@if [ "$(PPROF_KIND)" = "profile" ] || [ "$(PPROF_KIND)" = "trace" ]; then q="?seconds=$(PPROF_SECONDS)"; else q=""; fi; \
+	out="$(PPROF_DIR)/$(PPROF_KIND)-$(PPROF_PORT)-$$(date +%Y%m%dT%H%M%S).pb.gz"; \
+	echo ">> fetching $(PPROF_KIND) from http://localhost:$(PPROF_PORT)/debug/pprof/$(PPROF_KIND)$$q -> $$out"; \
+	curl -sf "http://localhost:$(PPROF_PORT)/debug/pprof/$(PPROF_KIND)$$q" -o "$$out" || { echo "pprof fetch failed: is the dev stack up (make dev-up)?"; exit 1; }; \
+	if [ "$(PPROF_KIND)" = "trace" ]; then go tool trace "$$out"; \
+	elif [ -n "$(PPROF_UI)" ]; then go tool pprof -http=$(PPROF_UI_ADDR) "$$out"; \
+	else go tool pprof "$$out"; fi
+
 # Remove dev containers and caches (module/build caches).
 dev-clean:
 	$(DOCKER) compose -f docker-compose-dev.yml down -v
 	$(MAKE) clean-scim
 
-# Start the docker-compose.yml demo cluster.
-run: build build-docker
+# Start the docker-compose.yml demo cluster. It runs the published image, so
+# nothing is built; check-certs supplies the config/certs the stack mounts.
+run: check-certs
 	$(DOCKER) compose -f docker-compose.yml up -d
+
+# Cross-repo seam self-check (family "make seams" contract).
+# community is a dependency ROOT (no Go sibling modules depend UP into it), so
+# the wide workspace degenerates to `use .`: we spin up an EPHEMERAL go.work,
+# compile + vet the whole module through it, then delete it. go.work is never
+# committed — the git-tag pin stays the single source of truth (ADR 0048).
+# `go build ./...` and `go vet ./...` are both hard gates: a broken seam fails
+# the compile, and vet must be clean. (The formerly-documented generated-code
+# diagnostics — duplicate JSON tags in pkg/ssfModels / pkg/goScim, unkeyed bson.E
+# in cmd/cluster-monitor — have been fixed on the release branch.)
+seams:
+	@echo ">> make seams: ephemeral wide go.work self-check (community = dependency root)"
+	@rm -f go.work go.work.sum
+	@trap 'rm -f go.work go.work.sum' EXIT INT TERM; \
+	  $(GO) work init && \
+	  $(GO) work use . && \
+	  echo ">> go build ./..." && $(GO) build ./... && \
+	  echo ">> go vet ./..." && $(GO) vet ./... && \
+	  echo ">> make seams: OK (wide-workspace build + vet green)"
+
+# --- Quality gate -----------------------------------------------------------
+# `make qa` is THE gate: one command that has to be green before a branch is
+# proposed for merge. It exists so there is a single place to hang a check --
+# CI, a pre-merge review, and an agent finishing a slice all run the same thing
+# rather than each remembering its own list of commands.
+#
+# Ordering is cheapest-first so an obvious failure reports in seconds rather
+# than after the race-detector suite: formatting, then the build-publish
+# contract (make -n only), then vet, then the go.mod
+# tidiness diff, then tests, then the goroutine-leak profile, then the
+# benchmark set.
+qa: fmt-check test-publish-contract vet tidy-check test leak-check bench
+	@echo ">> make qa: OK"
+
+# Go sources here are gofmt-canonical tabs. Any output from `gofmt -l` is a
+# failure -- gofmt -l reports the files it WOULD change and exits 0 either way,
+# so the target has to inspect the output rather than the exit status.
+fmt-check:
+	@echo ">> gofmt -l ."
+	@unformatted="$$($(GOFMT) -l .)"; \
+	  if [ -n "$$unformatted" ]; then \
+	    echo "ERROR: these files are not gofmt-clean; run 'gofmt -w' on them:"; \
+	    echo "$$unformatted"; \
+	    exit 1; \
+	  fi
+
+vet:
+	@echo ">> go vet ./..."
+	@$(GO) vet ./...
+
+test:
+	@echo ">> go test -race ./..."
+	@$(GO) test -race ./...
+
+# Fail if `go mod tidy` would change anything. Tidiness is checked rather than
+# applied: the gate must not silently rewrite dependency state underneath the
+# caller. go.mod/go.sum are backed up, tidy runs, the result is diffed, and the
+# trap restores the originals on every exit path including a failed diff.
+tidy-check:
+	@echo ">> go mod tidy (diff check)"
+	@cp go.mod go.mod.qa-backup && cp go.sum go.sum.qa-backup
+	@trap 'mv -f go.mod.qa-backup go.mod; mv -f go.sum.qa-backup go.sum' EXIT INT TERM; \
+	  $(GO) mod tidy && \
+	  if ! diff -u go.mod.qa-backup go.mod || ! diff -u go.sum.qa-backup go.sum; then \
+	    echo "ERROR: go.mod/go.sum are not tidy; run 'go mod tidy' and commit the result."; \
+	    exit 1; \
+	  fi
+
+# Go 1.27 GA'd goroutine leak detection as a runtime/pprof profile named
+# "goroutineleak": writing it runs a GC cycle with leak detection on and reports
+# the goroutines the runtime has PROVED can never become runnable again. It is
+# not the old count-before-and-after heuristic, so there is no tolerance to tune
+# and a slow-but-finishing goroutine is never reported.
+#
+# pkg/goroutineleak turns that profile into a TestMain hook. The hook is inert
+# unless I2SIG_GOROUTINE_LEAK_CHECK is set, which is what keeps `go test ./...`
+# unchanged in the edit/test loop and makes this target the thing that enforces
+# it. -count=1 is required: a cached PASS would skip the profile entirely.
+#
+# A failure prints each leaked goroutine's stack, which names the code that
+# started it -- not the test that stranded it. See docs/perf/go127-baseline.md
+# for how to narrow that down.
+leak-check:
+	@echo ">> goroutine leak profile: $(LEAK_PKGS)"
+	@I2SIG_GOROUTINE_LEAK_CHECK=1 $(GO) test -count=1 $(LEAK_PKGS)
+
+# Run the benchmark set. -run='^$$' selects no ordinary tests, so this measures
+# only the benchmarks. Override BENCHTIME for a real measurement run.
+bench:
+	@echo ">> benchmark set ($(BENCHTIME)): $(BENCH_PKGS)"
+	@$(GO) test -run='^$$' -bench=. -benchmem -benchtime=$(BENCHTIME) $(BENCH_PKGS)

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -41,6 +41,15 @@ type SsfServer struct {
 	// secret is NEVER stored here or in config.json; it is staged in
 	// ConfigData.oauthSecrets (in-memory only) or supplied at use time.
 	OAuthClientConfig *model.OAuthClientConfig `json:",omitempty"`
+	// StrictSsf marks this server as a strict-spec SSF transmitter (SSF §8.1.1.1):
+	// the CLI MUST NOT include transmitter-owned fields (iss, aud, issuerJWKSUrl)
+	// in publisher-leg POSTs to this server. goSignals-as-transmitter accepts
+	// those fields as an operator convenience (lets the receiver-CLI tell the
+	// transmitter what iss/aud to assert on outbound SETs); strict transmitters
+	// like the OpenID conformance suite reject them with HTTP 400. Set via
+	// `add server --strict-ssf`. Default false preserves the goSignals-to-
+	// goSignals cluster semantics.
+	StrictSsf bool `json:",omitempty"`
 }
 
 type Stream struct {
@@ -59,7 +68,7 @@ type ConfigData struct {
 	Selected      string
 	Servers       map[string]SsfServer
 	Pems          map[string][]byte
-	keys          map[string]*rsa.PrivateKey            // parsed keys - don't persist
+	keys          map[string]crypto.Signer              // parsed keys - don't persist
 	streamConfigs map[string]*model.StreamConfiguration // don't store (cached)
 	// oauthSecrets stages OAuth client secrets per server alias in memory only.
 	// It mirrors the keys/streamConfigs caches above and is NEVER persisted to
@@ -127,10 +136,14 @@ func (c *ConfigData) BuildServerRegistration(alias, flagSecret, envVar string) (
 	}, nil
 }
 
-func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
+// GetKey returns the signing key configured for issuerId, parsed from the
+// stored PEM and cached. The result is a crypto.Signer: the CLI hands it
+// straight to goSet.JWS, which is algorithm-neutral, so nothing here needs to
+// know that the PEMs happen to hold RSA keys.
+func (c *ConfigData) GetKey(issuerId string) (crypto.Signer, error) {
 	// Ensure cache map is initialized
 	if c.keys == nil {
-		c.keys = map[string]*rsa.PrivateKey{}
+		c.keys = map[string]crypto.Signer{}
 	}
 	// Return from cache if present
 	if key := c.keys[issuerId]; key != nil {
@@ -155,7 +168,13 @@ func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := pkcs8PrivateKey.(*rsa.PrivateKey)
+	// Checked, unlike the bare assertion this replaced: a PKCS#8 file holding a
+	// key type that cannot sign (or cannot sign here) now reports that instead
+	// of panicking on a CLI command.
+	key, ok := pkcs8PrivateKey.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("PEM for issuer '%s' holds a %T, which cannot sign", issuerId, pkcs8PrivateKey)
+	}
 	c.keys[issuerId] = key // cache the result
 
 	return key, nil
@@ -306,6 +325,15 @@ func (c *ConfigData) checkConfigPath(g *Globals) error {
 			if info, statErr := os.Stat(configPath); (statErr == nil && info.IsDir()) || filepath.Ext(configPath) == "" {
 				configPath = filepath.Join(configPath, ConfigFile)
 			}
+			// Match the default-path branch below: create the parent dir if
+			// missing so a fresh GOSIGNALS_HOME works on first use.
+			if dir := filepath.Dir(configPath); dir != "" {
+				if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+					if mkErr := os.MkdirAll(dir, 0770); mkErr != nil {
+						return mkErr
+					}
+				}
+			}
 			g.ConfigFile = configPath
 			return nil
 		}
@@ -352,7 +380,7 @@ func (c *ConfigData) Load(g *Globals) error {
 		c.Servers = map[string]SsfServer{}
 	}
 	if c.keys == nil {
-		c.keys = map[string]*rsa.PrivateKey{}
+		c.keys = map[string]crypto.Signer{}
 	}
 	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}
@@ -384,7 +412,7 @@ func (c *ConfigData) Load(g *Globals) error {
 		c.Servers = map[string]SsfServer{}
 	}
 	if c.keys == nil {
-		c.keys = map[string]*rsa.PrivateKey{}
+		c.keys = map[string]crypto.Signer{}
 	}
 	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}

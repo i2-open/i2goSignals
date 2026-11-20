@@ -4,7 +4,11 @@ import "time"
 
 // StreamConfiguration is a JSON Object describing and Event Stream's configuration [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#stream-config)\"
 type StreamConfiguration struct {
-	Id string `json:"stream_id" bson:"id"`
+	// stream_id is Read-Only / transmitter-assigned (SSF 1.0 §7.1.1). omitempty so
+	// a receiver's stream-registration request (which reuses this struct) does not
+	// send an empty stream_id — strict transmitters reject transmitter-supplied
+	// properties in a create body. Real responses always carry a non-empty Id.
+	Id string `json:"stream_id,omitempty" bson:"id"`
 
 	// Read-Only. A URL using the https scheme with no query or fragment component that the Transmitter asserts as its Issuer Identifier. This MUST be identical to the iss Claim value in Security Event Tokens issued from this Transmitter.
 	Iss string `json:"iss,omitempty" bson:"iss,omitempty"`
@@ -28,10 +32,10 @@ type StreamConfiguration struct {
 	Delivery *OneOfStreamConfigurationDelivery `json:"delivery" bson:"delivery"`
 
 	// Read-Only. An integer indicating the minimum amount of time in seconds that must pass in between verification requests. If an Event Receiver submits verification requests more frequently than this, the Event Transmitter MAY respond with a 429 status code. An Event Transmitter SHOULD NOT respond with a 429 status code if an Event Receiver is not exceeding this frequency.
-	MinVerificationInterval int32 `json:"min_verification_interval,omitempty" bson:"min_verification_interval,omitempty"`
+	MinVerificationInterval int32 `json:"min_verification_interval,omitzero" bson:"min_verification_interval,omitempty"`
 
 	// Read-Only. The refreshable inactivity timeout of the stream in seconds. After the timeout duration passes with no eligible activity from the Receiver, as defined below, the Transmitter MAY either pause, disable, or delete the stream
-	InactivityTimeout int32 `json:"inactivity_timeout,omitempty" bson:"inactivity_timeout,omitempty"`
+	InactivityTimeout int32 `json:"inactivity_timeout,omitzero" bson:"inactivity_timeout,omitempty"`
 
 	// Read-Write. The Subject Identifier Format that the Receiver wants for the events. If not set then the Transmitter might decide to use a type that discloses more information than necessary.
 	Format string `json:"format,omitempty" bson:"format,omitempty"`
@@ -49,6 +53,16 @@ type StreamConfiguration struct {
 
 	RouteMode string `json:"route_mode,omitempty" bson:"route_mode,omitempty"` // Is one of RouteModeImport, RouteModeForward or RouteModePublish
 
+	// SigningOnly is a goSignals business-stream receive posture (#184): when true,
+	// the SET's JWS signature — not a transport bearer — is the trust gate. A bearer
+	// becomes optional on the receive transports (push, poll-as-receiver, SSTP), but
+	// any bearer that IS presented must still be valid, and signature verification of
+	// inbound SETs becomes mandatory. Defaults to false (bearer-always, unchanged). It
+	// MUST NOT be inferred from "issuer is configured": stream-create requires both Iss
+	// and IssuerJWKSUrl when this is true, as the configured issuer's JWKS is the only
+	// trust anchor a signing-only stream has.
+	SigningOnly bool `json:"signingOnly,omitzero" bson:"signing_only,omitempty"`
+
 	// TxWellKnownUrl Used to record the well-known endpoint for the SSF transmitter. Used by receivers to discover the transmitter's configuration and capabilities.
 	// When creating a receiver, providing a value without endpoint values for Delivery (other than method) will cause i2goSignals to initiate an SSF registration with the transmitter.
 	TxWellKnownUrl *string `json:"tx_well_known_url,omitempty" bson:"tx_well_known_url,omitempty"`
@@ -62,10 +76,45 @@ type StreamConfiguration struct {
 	// RemoteStreamId holds the stream_id of the remote stream that this stream is connected to.
 	RemoteStreamId *string `json:"remote_stream_id,omitempty"`
 
+	// SigningAlg selects the JWS algorithm this stream's SETs are signed with
+	// (Slice Contract rev 1, Seam S3). "" and "RS256" both mean RSA-2048/RS256,
+	// which is what every stream signed with before RFC 9964 became selectable
+	// and remains the default; "ES256" opts the stream into ECDSA P-256, and
+	// "ML-DSA-65" into post-quantum signatures (FIPS 204, RFC 9964). For either
+	// opt-in the transmitter mints and publishes an additional key alongside
+	// its RSA key, under its own kid.
+	//
+	// It is per-stream rather than server-wide because each choice trades
+	// differently and the trade is paid per SET:
+	//
+	//   - ES256 is a transmitter-throughput choice. RSA-2048 signing measured
+	//     ~0.822 ms against P-256's ~0.019 ms, and signing runs once per event
+	//     per outbound stream, so a high fan-out stream saves far more CPU than
+	//     the receiver pays in slightly dearer verification (i2goSignals#284).
+	//   - ML-DSA-65 is a size cost paid by the receiver: its signature is 3309
+	//     bytes against RS256's 256, so every event grows by roughly 3.3 KB of
+	//     base64.
+	//
+	// A receiver that cannot verify EC or ML-DSA keeps its own stream on RS256
+	// while a capable peer opts in — on the same issuer and the same JWKS.
+	//
+	// omitzero, so a stream that never opts in is byte-identical on the wire to
+	// one configured before this field existed.
+	SigningAlg string `json:"signing_alg,omitzero" bson:"signing_alg,omitempty"`
+
 	// TxTLSCertificate is the PEM-encoded certificate for the transmitter
 	TxTLSCertificate string `json:"tx_tls_certificate,omitempty" bson:"tx_tls_certificate,omitempty"`
 	// TxTLSSkipVerify if true, skip certificate verification for the transmitter
-	TxTLSSkipVerify bool `json:"tx_tls_skip_verify,omitempty" bson:"tx_tls_skip_verify,omitempty"`
+	TxTLSSkipVerify bool `json:"tx_tls_skip_verify,omitzero" bson:"tx_tls_skip_verify,omitempty"`
+	// TxAllowPlaintext (goSignals extension) is the per-stream opt-out from the
+	// business-stream TLS floor (ADR-0066 §2 as amended by ADR 0076). When false
+	// (the default) every endpoint this server dials for the stream — push
+	// transmit, poll receive, and an SSTP initiator's endpoint_url — must be
+	// https, both at create/update validation and again at dial time. It is
+	// never derived from an environment variable, and it is orthogonal to
+	// TxTLSSkipVerify, which only relaxes certificate verification on an https
+	// dial. Control streams never set it (ADR-0063 §1).
+	TxAllowPlaintext bool `json:"tx_allow_plaintext,omitzero" bson:"tx_allow_plaintext,omitempty"`
 }
 
 func (sc *StreamConfiguration) DeepCopy() StreamConfiguration {

@@ -9,23 +9,22 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
+	ssef "github.com/i2-open/i2goSignals/internal/server"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/constants"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/pkg/constants"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	ssef "github.com/i2-open/i2goSignals/internal/server"
-	"github.com/i2-open/i2goSignals/pkg/httpSupport"
-	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/suite"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -97,16 +96,16 @@ func (suite *ServerSuite) Test1_Certificate() {
 	var rawJson json.RawMessage
 	_ = rawJson.UnmarshalJSON(body)
 
-	issPub, err := keyfunc.NewJSON(rawJson)
+	issPub, err := goSet.NewJwksWithAKP(rawJson)
 	assert.NoError(suite.T(), err, "No error parsing well known issuer")
 	assert.Equal(suite.T(), "DEFAULT", issPub.KIDs()[0], "Kid is DEFAULT")
-	issPub2, err := keyfunc.Get(serverUrl, keyfunc.Options{})
+	issPub2, err := goSet.FetchJwks(serverUrl, goSet.JwksOptions{})
 	assert.NoError(suite.T(), err, "Keyfunc retrieval had no error")
 
 	assert.Equal(suite.T(), body, issPub2.RawJWKS(), "Check JWKS issuers are equal")
 
 	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT", suite.servers[0].host)
-	issPub3, err := keyfunc.Get(serverUrl, keyfunc.Options{})
+	issPub3, err := goSet.FetchJwks(serverUrl, goSet.JwksOptions{})
 	assert.NoError(suite.T(), err, "Check no error keyfunc retrieval of /jwks/issuer")
 	assert.Equal(suite.T(), body, issPub3.RawJWKS(), "Check JWKS issuers are equal")
 }
@@ -131,7 +130,7 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
 
 	suite.Equal(constants.GoSignalsVersion, config.GoSignalsVersion, "Go Signals Version should have correct version")
-	suite.Equal(4, len(config.DeliveryMethodsSupported), "GoSignals has 4 methods")
+	suite.Equal(5, len(config.DeliveryMethodsSupported), "GoSignals has 5 methods (4 RFC + SSTP)")
 }
 
 // Test3_StreamConfig Tests the following sequence
@@ -237,7 +236,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream should be successfully deleted")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Should be OK status")
+	assert.Equal(suite.T(), http.StatusNoContent, resp.StatusCode, "Should be 204 No Content")
 
 	// Step 4.
 
@@ -292,7 +291,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream delete request ok")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Delete return status 200")
+	assert.Equal(suite.T(), http.StatusNoContent, resp.StatusCode, "Delete return status 204")
 }
 
 // Test4_StreamUpdate checks the stream configuration update functionality via HTTP PUT.
@@ -309,23 +308,26 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	config, _ := suite.servers[0].CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
+	config, _ := suite.servers[0].CreateStream(transConfig, authSupport.ConvertProject(suite.servers[0].projectId))
 	streamToken := config.Delivery.PollTransmitMethod.AuthorizationHeader
 
 	suite.servers[0].streamToken = streamToken
 	suite.servers[0].stream = config
 
-	suite.servers[0].stream.EventsRequested = suite.servers[0].stream.EventsSupported
 	streamUrl := fmt.Sprintf("http://%s/stream?stream_id=%s", suite.servers[0].host, suite.servers[0].stream.Id)
 
 	// check that the delivery structure was serialized and deserialized correctly
 	assert.NotNil(suite.T(), config.Delivery, "Delivery is not null")
 	assert.NotNil(suite.T(), config.Delivery.PollTransmitMethod, "Poll delivery is defined")
-	assert.Equal(suite.T(), 0, len(config.EventsDelivered), "No events to be delivered")
+	// An omitted events_requested defaults to the full supported catalog: a stream
+	// registered without asking for anything specific delivers everything.
+	assert.Equal(suite.T(), len(config.EventsSupported), len(config.EventsDelivered),
+		"All supported events delivered by default")
 
-	testLog.Println("Updating stream with PUT to request all events supported...")
-	// enable all events
-	config.EventsRequested = config.EventsSupported // request all events
+	testLog.Println("Updating stream with PUT to narrow the requested events...")
+	// narrow the stream to a single event so the PUT visibly re-negotiates
+	config.EventsRequested = config.EventsSupported[0:1]
+	suite.servers[0].stream.EventsRequested = config.EventsRequested
 
 	// Do PUT to update
 	bodyBytes, err := json.MarshalIndent(config, "", " ")
@@ -357,7 +359,7 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 	if err != nil {
 		return
 	}
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check delete ok")
+	assert.Equal(suite.T(), http.StatusNoContent, resp.StatusCode, "Check delete ok")
 }
 
 // Test5_PollStreamDelivery sets up a polling delivery stream between SSF1 and SSF2 and tests an event can be transferred
@@ -375,12 +377,14 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	assert.NoError(suite.T(), err, "No error generating event")
 	// time.Sleep(2 * time.Second)
 	testLog.Println("Looking for event on SSF2...")
-	var event *model.AgEventRecord
-	event = suite.servers[1].GetEventRecord(jti)
+	var event *model.EventRecord
+	// SSF2 receives the re-signed SET under its derived jti (#363).
+	rcvJti := deliveredJti(suite.servers[0].stream, jti)
+	event = suite.servers[1].GetEventRecord(rcvJti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 500)
-		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].GetEventRecord(jti)
+		testLog.Println("WAITING for event " + rcvJti)
+		event = suite.servers[1].GetEventRecord(rcvJti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
@@ -453,7 +457,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	   time.Sleep(time.Millisecond * 500)
 	   // After PUT reset request
 	   require.Eventually(suite.T(), func() bool {
-	       jtis, more := suite.servers[0].app.EventService.GetEventIds(context.Background(), 
+	       jtis, more := suite.servers[0].app.EventService.GetEventIds(context.Background(),
 	           suite.servers[0].stream.Id,
 	           model.PollParameters{ReturnImmediately: true},
 	       )
@@ -471,7 +475,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	jtis, more = suite.servers[0].app.EventService.GetEventIds(context.Background(), suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
-	assert.Contains(suite.T(), jtis, jtiNew, "The new event should be present")
+	assert.Contains(suite.T(), pendingref.RefJtis(jtis), jtiNew, "The new event should be present")
 
 	ssf1Stream := suite.servers[0].stream.Id
 	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
@@ -499,7 +503,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		IssuerJWKSUrl:   jwksIssuer.String(),
 		RouteMode:       model.RouteModeImport,
 	}
-	stream, err := suite.servers[1].CreateStream(reg, authUtil.ConvertProject("DEFAULT"))
+	stream, err := suite.servers[1].CreateStream(reg, authSupport.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
 	state, _ := suite.servers[1].GetStreamState(stream.Id)
 	suite.servers[1].app.EventRouter.UpdateStreamState(state)
@@ -519,13 +523,14 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		AuthorizationHeader: streamToken1,
 	}
 	regPush := model.StreamConfiguration{
-		Aud:             []string{"test.example.com"},
-		Iss:             "DEFAULT",
-		Delivery:        &model.OneOfStreamConfigurationDelivery{PushTransmitMethod: delivery2},
-		EventsRequested: stream.EventsDelivered,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Aud:              []string{"test.example.com"},
+		Iss:              "DEFAULT",
+		Delivery:         &model.OneOfStreamConfigurationDelivery{PushTransmitMethod: delivery2},
+		EventsRequested:  stream.EventsDelivered,
 	}
 
-	stream, err = suite.servers[0].CreateStream(regPush, authUtil.ConvertProject("DEFAULT"))
+	stream, err = suite.servers[0].CreateStream(regPush, authSupport.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
 	state, _ = suite.servers[0].GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
@@ -540,12 +545,14 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	assert.NoError(suite.T(), err, "No error generating event")
 	time.Sleep(500 * time.Millisecond) // await processing (for reliable testing)
 	testLog.Println("Looking for event on SSF2...")
-	var event *model.AgEventRecord
-	event = suite.servers[1].GetEventRecord(jti)
+	var event *model.EventRecord
+	// SSF2 receives the re-signed SET under its derived jti (#363).
+	rcvJti := deliveredJti(suite.servers[0].stream, jti)
+	event = suite.servers[1].GetEventRecord(rcvJti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 250)
-		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].GetEventRecord(jti)
+		testLog.Println("WAITING for event " + rcvJti)
+		event = suite.servers[1].GetEventRecord(rcvJti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
@@ -733,21 +740,19 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 	assert.Contains(suite.T(), names.Issuers, "https://example.com", "Issuer https://example.com returned")
 }
 
+// TestB_DeleteIssuers confirms the hard-delete HTTP surface is gone (community
+// ADR 0028 / admin ADR 0013). DELETE /key/{keyName} matches no method on that
+// path now, so gorilla/mux returns 405. Keys are retired via
+// POST /key/{keyName}/status instead.
 func (suite *ServerSuite) TestB_DeleteIssuers() {
 
-	baseUrl := fmt.Sprintf("http://%s/key/notfound.com", suite.servers[0].host)
+	baseUrl := fmt.Sprintf("http://%s/key/example.com", suite.servers[0].host)
 	req, _ := http.NewRequest(http.MethodDelete, baseUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error making request")
-	assert.Equal(suite.T(), http.StatusNotFound, resp.StatusCode, "Issuer not found")
-
-	baseUrl = fmt.Sprintf("http://%s/key/example.com", suite.servers[0].host)
-	req, _ = http.NewRequest(http.MethodDelete, baseUrl, nil)
-	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
-	resp, err = suite.servers[0].client.Do(req)
-	assert.NoError(suite.T(), err, "No error making request")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Request completed")
+	assert.Contains(suite.T(), []int{http.StatusMethodNotAllowed, http.StatusNotFound}, resp.StatusCode,
+		"hard-delete route removed")
 }
 
 func (suite *ServerSuite) TestC_RotateIssuerKey() {
@@ -771,7 +776,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	body, _ = io.ReadAll(resp.Body)
 	var rawJson json.RawMessage
 	_ = rawJson.UnmarshalJSON(body)
-	issPub, err := keyfunc.NewJSON(rawJson)
+	issPub, err := goSet.NewJwksWithAKP(rawJson)
 	assert.NoError(suite.T(), err)
 	assert.Len(suite.T(), issPub.KIDs(), 1, "Should have 1 key initially")
 	assert.Equal(suite.T(), issuer, issPub.KIDs()[0], "Initial KID should be the issuer ID")
@@ -818,7 +823,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	assert.True(suite.T(), ok, "Should be an RSA private key")
 
 	_ = rawJson.UnmarshalJSON(body)
-	issPubUpdated, err := keyfunc.NewJSON(rawJson)
+	issPubUpdated, err := goSet.NewJwksWithAKP(rawJson)
 	assert.NoError(suite.T(), err)
 
 	assert.Contains(suite.T(), issPubUpdated.KIDs(), issuer, "Original KID should still be present")
@@ -969,7 +974,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	stream, _ := suite.servers[0].CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
+	stream, _ := suite.servers[0].CreateStream(transConfig, authSupport.ConvertProject(suite.servers[0].projectId))
 	state, _ := suite.servers[0].GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
 	streamToken := stream.Delivery.PollTransmitMethod.AuthorizationHeader
@@ -992,8 +997,9 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 	}
 
 	req := model.StreamConfiguration{
-		Aud: []string{"test.example.com"},
-		Iss: stream.Iss,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Aud:              []string{"test.example.com"},
+		Iss:              stream.Iss,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:              model.ReceivePoll,
@@ -1096,7 +1102,7 @@ func (suite *ServerSuite) TestE_StatusUpdateReflection() {
 	}
 	method := &model.PollTransmitMethod{Method: model.DeliveryPoll}
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
-	config, err := server.CreateStream(transConfig, authUtil.ConvertProject(server.projectId))
+	config, err := server.CreateStream(transConfig, authSupport.ConvertProject(server.projectId))
 	assert.NoError(suite.T(), err)
 	streamId := config.Id
 

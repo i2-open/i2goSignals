@@ -1,22 +1,22 @@
 package mongo_provider
 
 import (
-    "net/url"
+	"net/url"
 
-    "github.com/i2-open/i2goSignals/internal/providers/storage"
+	"github.com/i2-open/i2goSignals/internal/providers/storage"
 )
 
 // MongoStorage is a narrow lifecycle wrapper exposing only the surface
 // described by storage.Storage. It is the value Persistence.Storage holds
 // for Mongo-backed servers.
 type MongoStorage struct {
-    p *MongoProvider
+	p *MongoProvider
 }
 
 // NewMongoStorage wraps a MongoProvider for use behind the storage.Storage
 // seam.
 func NewMongoStorage(p *MongoProvider) *MongoStorage {
-    return &MongoStorage{p: p}
+	return &MongoStorage{p: p}
 }
 
 // Compile-time check.

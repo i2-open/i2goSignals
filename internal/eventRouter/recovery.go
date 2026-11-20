@@ -129,13 +129,34 @@ func (c *RecoveryConfig) fillDefaults() {
 		c.Clock = time.Now
 	}
 	if c.Sleep == nil {
-		c.Sleep = defaultSleep
+		c.Sleep = SleepCtx
 	}
 }
 
-func defaultSleep(ctx context.Context, d time.Duration) bool {
+// SleepCtx is the family's single cancellable delay primitive: it waits for d and
+// reports true, or returns false the moment ctx is cancelled. It is the default
+// RecoveryConfig.Sleep and the default SstpDialerConfig.Sleep — one helper rather
+// than the two near-identical copies that used to live in this file and in
+// internal/server/sstp_dialer.go.
+//
+// It never uses time.After. Go 1.27 removed the asynctimerchan GODEBUG escape
+// hatch, so a timer channel is unbuffered and a time.After left unstopped keeps a
+// runtime timer armed for the full duration even after the caller has moved on.
+// SleepCtx owns a time.Timer and stops it on every exit path, which matters most
+// on the cancellation path: that is precisely when the delay is longest and the
+// caller least wants to hold a timer.
+//
+// A non-positive d still honours cancellation — a cancelled ctx reports false
+// rather than "the zero-length sleep completed", so callers in a retry loop see
+// shutdown on the first iteration instead of one spin later.
+func SleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
-		return true
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -261,11 +282,21 @@ func (r *router) recoveryLoop(ctx context.Context, stream *model.StreamStateReco
 
 		attempts++
 		status, err := fetcher(ctx, stream)
+		if ctx.Err() != nil {
+			// Cancelled while the fetch was out (lease lost, runner stopped,
+			// shutdown). A fetch cut short says nothing about the receiver, so it
+			// must not count against a cap or move the stream's state.
+			return RecoveryOutcomeContextDone
+		}
 
 		if err == nil && status != nil {
 			switch status.Status {
 			case model.StreamStateEnabled:
-				r.updateStream(stream, model.StreamStateEnabled, "")
+				// An operator's pause or disable stored during recovery wins.
+				if !r.resumeOwnPause(stream) {
+					r.logRecoveryResolved(sid, RecoveryOutcomeDisabled, currentMode, cfg.Clock().Sub(started))
+					return RecoveryOutcomeDisabled
+				}
 				r.logRecoveryResolved(sid, RecoveryOutcomeResumed, currentMode, cfg.Clock().Sub(started))
 				return RecoveryOutcomeResumed
 

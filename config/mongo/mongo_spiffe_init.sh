@@ -84,7 +84,7 @@ echo "Initial certificates fetched and prepared"
 # ---------------------------------------------------------------------------
 
 # Compute first 16 bytes (128 bits) of SHA256 of a SPIFFE ID URI as hex.
-# Uses only tools present in mongo:latest (openssl, awk, cut).
+# Uses only tools present in mongo:8.0.13 (openssl, awk, cut).
 spiffe_hash() {
     printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-32
 }

@@ -9,7 +9,7 @@ import (
 // TestDbUrl is the local-dev fallback MongoDB URL for these tests. It
 // points at the replica-set spun up by the project's docker-compose dev
 // stack (mongo1/mongo2/mongo3). CI does not run that stack; CI exposes a
-// single-node mongo:7 via the MONGO_URL env var instead — see mongoURL().
+// single-node mongo:8.0.13 via the MONGO_URL env var instead — see mongoURL().
 //
 // The 5s serverSelectionTimeoutMS keeps a no-mongo `go test ./...`
 // failing fast so the Skip path triggers within a few seconds rather
@@ -17,7 +17,7 @@ import (
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
 
 // mongoURL returns the MongoDB URL these tests connect to. CI sets
-// MONGO_URL (single-node mongo:7 service at mongodb://localhost:27017);
+// MONGO_URL (single-node mongo:8.0.13 service at mongodb://localhost:27017);
 // local devs running the docker-compose cluster get TestDbUrl. When
 // neither mongo is reachable, callers Skip on the Open/Check error.
 func mongoURL() string {

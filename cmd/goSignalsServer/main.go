@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
@@ -34,7 +36,11 @@ func stripQuotes(s string) string {
 	return s
 }
 
-func StartProvider(dbUrl string) (*dbProviders.Persistence, error) {
+// StartProvider opens persistence bound to the process lifecycle ctx. Cancelling
+// ctx — which main does on its way out — cancels the cluster coordinator's
+// in-flight lease heartbeats instead of leaving each to run out its own deadline
+// against a connection the process is about to drop (seam S4).
+func StartProvider(ctx context.Context, dbUrl string) (*dbProviders.Persistence, error) {
 
 	name := "ssef"
 	if found := stripQuotes(envcompat.Lookup("I2SIG_STORE_MONGO_DBNAME", "DBNAME")); found != "" {
@@ -42,7 +48,7 @@ func StartProvider(dbUrl string) (*dbProviders.Persistence, error) {
 		name = found
 	}
 
-	return dbProviders.OpenPersistence(dbUrl, name)
+	return dbProviders.OpenPersistenceWithContext(ctx, dbUrl, name)
 }
 
 func main() {
@@ -60,6 +66,9 @@ func main() {
 	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSignals server starting...", "version", constants.GoSignalsVersion)
+	// The default key type (I2SIG_KEY_ALG) is a startup error when it names no
+	// supported type, rather than a silent fallback (spec #114).
+	services.LogDefaultKeyAlgOrExit(mLog)
 	port := "8888"
 	if found := stripQuotes(os.Getenv("PORT")); found != "" {
 		port = found
@@ -73,7 +82,12 @@ func main() {
 		mLog.Info("MONGO_URL not set, using memory provider")
 	}
 
-	persistence, err := StartProvider(dbUrl)
+	// Process lifecycle context: everything persistence owns is scoped to it, and
+	// the deferred cancel is what shutdown means to the cluster coordinator.
+	lifecycle, cancelLifecycle := context.WithCancel(context.Background())
+	defer cancelLifecycle()
+
+	persistence, err := StartProvider(lifecycle, dbUrl)
 	if err != nil {
 		mLog.Error("Fatal: Unable to start database provider", "error", err)
 		os.Exit(-1)

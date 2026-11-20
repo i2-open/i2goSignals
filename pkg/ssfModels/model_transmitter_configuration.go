@@ -56,9 +56,13 @@ type TransmitterConfiguration struct {
 
 	AuthorizationSchemes []AuthScheme `json:"authorization_schemes,omitempty"`
 
-	AuthorizationServers   []string `json:"authorization_servers,omitempty"`
-	ScopesSupported        []string `json:"scopes_supported,omitempty"`
-	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
+	// NOTE: OAuth authorization-server, bearer-method, and flat scope metadata
+	// (authorization_servers, bearer_methods_supported, scopes_supported) are
+	// deliberately NOT carried here. They are not part of the OpenID SSF
+	// Transmitter Configuration spec; they belong to RFC 9728 Protected Resource
+	// Metadata (see ProtectedResourceMetadata above, served at
+	// /.well-known/oauth-protected-resource). The flat scope list is also
+	// redundant with the SupportedScopes endpoint→scope map above.
 
 	SpecVersion      string `json:"spec_version,omitempty"`
 	GoSignalsVersion string `json:"gosignals_version,omitempty"`
@@ -92,18 +96,6 @@ func (tc *TransmitterConfiguration) DeepCopy() *TransmitterConfiguration {
 	if tc.AuthorizationSchemes != nil {
 		res.AuthorizationSchemes = make([]AuthScheme, len(tc.AuthorizationSchemes))
 		copy(res.AuthorizationSchemes, tc.AuthorizationSchemes)
-	}
-	if tc.AuthorizationServers != nil {
-		res.AuthorizationServers = make([]string, len(tc.AuthorizationServers))
-		copy(res.AuthorizationServers, tc.AuthorizationServers)
-	}
-	if tc.ScopesSupported != nil {
-		res.ScopesSupported = make([]string, len(tc.ScopesSupported))
-		copy(res.ScopesSupported, tc.ScopesSupported)
-	}
-	if tc.BearerMethodsSupported != nil {
-		res.BearerMethodsSupported = make([]string, len(tc.BearerMethodsSupported))
-		copy(res.BearerMethodsSupported, tc.BearerMethodsSupported)
 	}
 	return &res
 }

@@ -1,0 +1,906 @@
+package services
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/oauthClient"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+var sstpLog = logger.Sub("SSTP")
+
+// validateSstpEndpointUrl performs the create-time syntactic validation of an
+// SSTP EndpointUrl (PRD #154 Q28): scheme must be http or https, reject
+// query/fragment, require a non-empty host. No network probe is performed.
+//
+// Whether http is acceptable is not decided here: the business-stream TLS
+// floor (validateBusinessStreamTransport, ADR-0066 §2 as amended by ADR 0076)
+// refuses an initiator's plaintext endpoint unless the pair carries the
+// tx_allow_plaintext opt-out. The former I2SIG_INSECURE_SSTP_HTTP environment
+// gate is retired by that per-stream field (i2goSignals#322).
+func validateSstpEndpointUrl(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint_url: %v", err)
+	}
+	switch u.Scheme {
+	case "https", "http":
+	default:
+		return fmt.Errorf("invalid endpoint_url: scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return errors.New("invalid endpoint_url: host must be non-empty")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("invalid endpoint_url: query and fragment are not allowed")
+	}
+	return nil
+}
+
+// validateSstpDirection enforces the minimal structural validation on a single
+// half of an SSTP pair (PRD #154 Q27, Q29): non-empty Iss and Aud, and a
+// recognized mode and, when present, receive_mode. Events are accepted loosely
+// (no registry check, empty allowed). No reciprocity is enforced against the
+// other half.
+//
+// Iss and Aud are checked for PRESENCE, not shape. They are JWT StringOrURI
+// values (RFC 7519 s2, s4.1.1, s4.1.3): a value containing a colon MUST be a
+// URI, and anything else is an arbitrary string. Using URIs throughout is an
+// SSF convention, not a validity rule, and enforcing it here refused legal
+// deployments — most obviously a FORWARD direction, which carries the issuer
+// its UPSTREAM asserts rather than one this server chose, so a fleet whose
+// issuers are bare hostnames could not be relayed at all. A non-URI value is
+// warned about instead: a strict SSF peer may still reject the stream, and that
+// is worth saying without being worth refusing.
+func validateSstpDirection(name string, d model.SstpDirection) error {
+	if err := requireNonEmpty(name+".iss", d.Iss); err != nil {
+		return err
+	}
+	warnIfNotUriShaped(name+".iss", d.Iss)
+	if len(d.Aud) == 0 {
+		return fmt.Errorf("invalid %s.aud: must be non-empty", name)
+	}
+	for _, a := range d.Aud {
+		if err := requireNonEmpty(name+".aud", a); err != nil {
+			return err
+		}
+		warnIfNotUriShaped(name+".aud", a)
+	}
+	if _, ok := model.SstpModeToRouteMode(d.Mode); !ok {
+		return fmt.Errorf("invalid %s.mode: must be one of FORWARD, PUBLISH, IMPORT", name)
+	}
+	// receive_mode is optional; when present it must be a receive-side choice
+	// (issue #306). PUBLISH is a valid mode but not a valid receive_mode: a
+	// receiver cannot act on it differently from FORWARD (ADR 0031 D2).
+	if d.ReceiveMode != "" {
+		if _, ok := model.SstpReceiveModeToRouteMode(d.ReceiveMode); !ok {
+			return fmt.Errorf("invalid %s.receive_mode: must be one of IMPORT, FORWARD", name)
+		}
+	}
+	// A pattern that cannot compile matches nothing, so the leg would come up
+	// with a narrower events_delivered than the bootstrap asked for and no error
+	// anywhere (spec #247). Reject the bootstrap instead.
+	if err := model.ValidateEventPatterns(d.Events); err != nil {
+		return fmt.Errorf("invalid %s.events: %v", name, err)
+	}
+	if err := validateSstpDirectionEventSource(name, d.EventSource); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateSstpDirectionEventSource applies the ADR 0004 event_source rules to
+// one direction of a bootstrap (issue #296). A nil descriptor is the pre-#296
+// shape and passes.
+//
+// The two shared rules — EXPLICIT must name at least one source stream, and
+// source_stream_ids is meaningless on anything else — are validateEventSource's,
+// called rather than restated so a pair can never build a direction that the
+// push and poll paths would refuse. Its subject-filter-mode argument is empty
+// because a bootstrap carries no subject_filter_mode for a DIRECT leg to
+// conflict with, so that rule does not arise here.
+//
+// The unknown-type rejection is this validator's own. validateEventSource
+// tolerates an unrecognized type and effectiveEventSourceType then routes it as
+// DIRECT; loosening or tightening that for push and poll is not this change's
+// business. A pair bootstrap has no such history, so a mistyped type is refused
+// at the door instead of silently becoming DIRECT.
+func validateSstpDirectionEventSource(name string, es *model.EventSource) error {
+	if es == nil {
+		return nil
+	}
+	switch es.Type {
+	case "", model.EventSourceDirect, model.EventSourceAudience, model.EventSourceExplicit:
+	default:
+		return fmt.Errorf("%s: invalid event_source.type %q: must be one of %s, %s, %s",
+			name, es.Type, model.EventSourceDirect, model.EventSourceAudience, model.EventSourceExplicit)
+	}
+	if err := validateEventSource(es, ""); err != nil {
+		return fmt.Errorf("%s: %v", name, err)
+	}
+	return nil
+}
+
+// requireNonEmpty rejects an empty value. This is the whole of the create-time
+// rule for a StringOrURI claim — see validateSstpDirection for why shape is not
+// part of it.
+func requireNonEmpty(field, value string) error {
+	if value == "" {
+		return fmt.Errorf("invalid %s: must be non-empty", field)
+	}
+	return nil
+}
+
+// isUriShaped reports whether value is already an absolute URI: it parses, it
+// carries a scheme, and it holds none of the space or control characters RFC
+// 3986 forbids anywhere in a URI. That last check has to be explicit because
+// url.Parse tolerates them in an opaque part — "a:b c" parses with scheme "a"
+// — and a value that colonises but does not parse cleanly is exactly the one
+// worth warning about. Per RFC 7519 s2 a StringOrURI containing a colon MUST be
+// a URI, so this asks whether the value IS one, not whether it is allowed to be.
+func isUriShaped(value string) bool {
+	if strings.ContainsFunc(value, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return false
+	}
+	u, err := url.Parse(value)
+	return err == nil && u.Scheme != ""
+}
+
+// warnIfNotUriShaped records that a legal-but-unconventional claim went by. The
+// bootstrap is accepted either way; the log line exists so an interop failure
+// against a strict SSF peer is diagnosable from this server's own output rather
+// than from the peer's refusal.
+func warnIfNotUriShaped(field, value string) {
+	if isUriShaped(value) {
+		return
+	}
+	sstpLog.Warn("SSTP bootstrap claim is not URI-shaped; legal per RFC 7519 but the SSF profile uses URIs, so a strict SSF peer may reject this stream",
+		"field", field, "value", value)
+}
+
+// CreateSstpPair expands an SstpPairBootstrap into one node's half of a
+// bidirectional SSTP StreamStateRecord and persists it (PRD #154 slice #161,
+// ADR 0019). It is the discriminator branch of POST /stream for SSTP bodies.
+//
+// Role drives the order of operations and the credential/endpoint source:
+//   - responder: server-derives EndpointUrl and server-mints the bearer; the
+//     local row is written first, then the mirrored bootstrap is cascaded to the
+//     peer. A peer-cascade failure rolls back the local row (ReceivePush-style).
+//   - initiator: the operator supplies the bearer (the peer responder minted
+//     it); no local row exists until the peer returns, so a peer-cascade failure
+//     writes nothing (ReceivePoll-style).
+//
+// peerServer may be pre-resolved by the caller; otherwise it is resolved from
+// bootstrap.PeerServerAlias via the ServerService. When no peer alias is given,
+// only the local half is provisioned (Q31).
+func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.SstpPairBootstrap, projectID string, peerServer *model.Server) (model.StreamStateRecord, error) {
+	invalidateRequestStreams(ctx)
+	// Everything this function refuses about the bootstrap itself is the caller's
+	// to fix, so each such return carries ErrInvalidRequest and the handler answers
+	// 400 (SSF s8.1.1.1). A return without it is an unexpected server condition —
+	// a mint failure, a store write, an unreachable peer — and answers 500 (RFC
+	// 9110 s15.6.1).
+
+	// Role is required at create with no default (Q30).
+	switch bootstrap.Role {
+	case model.SstpRoleInitiator, model.SstpRoleResponder:
+	default:
+		return model.StreamStateRecord{}, fmt.Errorf("%w: invalid role: must be %q or %q", ErrInvalidRequest, model.SstpRoleInitiator, model.SstpRoleResponder)
+	}
+
+	// Structural validation of both halves before any state is mutated (Q27, Q29).
+	if err := validateSstpDirection("primary", bootstrap.Primary); err != nil {
+		return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if err := validateSstpDirection("inbound", bootstrap.Inbound); err != nil {
+		return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+
+	// Resolve the peer Server from the alias when the caller didn't pre-resolve.
+	// An alias no Server carries is the caller naming a peer that isn't
+	// registered — a 400. A store that cannot answer is a server fault, so it
+	// keeps its own error and answers 500. interfaces.ErrNotFound is deliberately
+	// NOT wrapped: it addresses the alias, not a stream, and letting it out would
+	// read as stream-not-found at the HTTP boundary. A server wired without a
+	// ServerService cannot resolve any alias; that is this server misconfigured,
+	// not the caller, and ignoring the alias would answer 201 for a pair whose
+	// peer half was never provisioned.
+	if peerServer == nil && bootstrap.PeerServerAlias != "" {
+		if s.serverService == nil {
+			return model.StreamStateRecord{}, fmt.Errorf("cannot resolve peer_server_alias %q: no server registry is configured", bootstrap.PeerServerAlias)
+		}
+		resolved, err := s.serverService.GetServerByAlias(ctx, bootstrap.PeerServerAlias)
+		if err != nil {
+			if errors.Is(err, interfaces.ErrNotFound) {
+				return model.StreamStateRecord{}, fmt.Errorf("%w: unknown peer_server_alias %q", ErrInvalidRequest, bootstrap.PeerServerAlias)
+			}
+			return model.StreamStateRecord{}, fmt.Errorf("looking up peer_server_alias %q: %w", bootstrap.PeerServerAlias, err)
+		}
+		peerServer = resolved
+	}
+
+	// Role-asymmetric credential/endpoint handling (Q30, Q33).
+	endpointUrl := bootstrap.EndpointUrl
+	authHeader := bootstrap.AuthorizationHeader
+
+	mid := model.NewRecordId()
+	pairId := mid.Hex()
+	// Generate the inbound (rx-side) SID up front so the responder can mint the
+	// pair bearer covering BOTH real SIDs (finding #7). buildSstpRecord is told to
+	// reuse this exact SID so the token binding and the persisted record agree.
+	inboundSid := ids.NewV7()
+
+	if bootstrap.Role == model.SstpRoleResponder {
+		// Responder rejects an operator-supplied EndpointUrl and bearer; both are
+		// server-derived/minted.
+		if bootstrap.EndpointUrl != "" {
+			return model.StreamStateRecord{}, fmt.Errorf("%w: endpoint_url must not be supplied on a responder; it is server-derived", ErrInvalidRequest)
+		}
+		if bootstrap.AuthorizationHeader != "" {
+			return model.StreamStateRecord{}, fmt.Errorf("%w: authorization_header must not be supplied on a responder; it is server-minted", ErrInvalidRequest)
+		}
+		endpointUrl = s.getFullUrl(fmt.Sprintf("/sstp/%s", pairId))
+
+		// Mint the per-pair bearer covering both SIDs: [txSid (== PairId), rxSid
+		// (== inbound SID)]. Both must be real so per-direction status/verify naming
+		// the inbound SID authorizes (finding #7).
+		token, err := s.keyService.authIssuerFor(ctx).IssueSstpPairToken(pairId, inboundSid, projectID, false, sessionFromCtx(ctx))
+		if err != nil {
+			return model.StreamStateRecord{}, fmt.Errorf("failed to mint sstp pair token: %v", err)
+		}
+		authHeader = "Bearer " + token
+	} else {
+		// Initiator: the operator must supply the bearer (Q30); the peer responder
+		// minted it.
+		if bootstrap.AuthorizationHeader == "" {
+			return model.StreamStateRecord{}, fmt.Errorf("%w: authorization_header is required on an initiator", ErrInvalidRequest)
+		}
+	}
+
+	// EndpointUrl syntactic validation, when present (Q28). The responder always
+	// has one (just derived); the initiator may not have learned it yet. Only the
+	// initiator's came from the caller, so only that one is a 400; a responder's
+	// is derived from this server's own base URL, and a bad one there is this
+	// server misconfigured — an unexpected condition, and a 500.
+	if endpointUrl != "" {
+		if err := validateSstpEndpointUrl(endpointUrl); err != nil {
+			if bootstrap.EndpointUrl != "" {
+				return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+			}
+			return model.StreamStateRecord{}, fmt.Errorf("the derived responder endpoint_url is not usable; check this server's base URL: %v", err)
+		}
+	}
+
+	rec := s.buildSstpRecord(mid, pairId, inboundSid, projectID, bootstrap, endpointUrl, authHeader)
+
+	// Business-stream TLS floor (i2goSignals#322): an initiator dials its
+	// endpoint_url, so a plaintext one needs the pair's tx_allow_plaintext
+	// opt-out. The responder's URL is served, not dialed, and passes.
+	if err := validateBusinessStreamTransport(*rec); err != nil {
+		return model.StreamStateRecord{}, err
+	}
+
+	// A Publish primary re-signs under its iss, so it needs an active signing
+	// key before anything is written or cascaded (#308).
+	if err := s.RequireActiveSigningKey(ctx, rec); err != nil {
+		return model.StreamStateRecord{}, err
+	}
+
+	if bootstrap.Role == model.SstpRoleResponder {
+		// ReceivePush-style: write local first, then cascade; roll back on failure.
+		if err := s.streamDAO.Create(ctx, rec); err != nil {
+			return model.StreamStateRecord{}, err
+		}
+		if peerServer != nil {
+			if err := s.cascadeSstpPeer(ctx, rec, bootstrap, peerServer); err != nil {
+				if delErr := s.DeleteStream(ctx, rec.StreamConfiguration.Id); delErr != nil {
+					ssLog.Error("failed to roll back local sstp half after peer cascade failure", "pair_id", pairId, "error", delErr)
+				}
+				return model.StreamStateRecord{}, fmt.Errorf("sstp peer cascade failed: %v", err)
+			}
+			// Persist the peer's PairId learned during the cascade; the local row
+			// was written before the cascade ran (ReceivePush-style ordering).
+			if err := s.streamDAO.Update(ctx, rec); err != nil {
+				return model.StreamStateRecord{}, fmt.Errorf("failed to persist peer_pair_id after cascade: %v", err)
+			}
+		}
+		ssLog.Info("SSTP pair created", "pair_id", pairId, "role", bootstrap.Role)
+		return *rec, nil
+	}
+
+	// Initiator, ReceivePoll-style: cascade first (no local row yet), then write
+	// local using whatever the peer returned. No rollback because nothing local
+	// exists until the peer succeeds.
+	if peerServer != nil {
+		if err := s.cascadeSstpPeer(ctx, rec, bootstrap, peerServer); err != nil {
+			return model.StreamStateRecord{}, fmt.Errorf("sstp peer cascade failed: %v", err)
+		}
+	}
+	if err := s.streamDAO.Create(ctx, rec); err != nil {
+		return model.StreamStateRecord{}, err
+	}
+	ssLog.Info("SSTP pair created", "pair_id", pairId, "role", bootstrap.Role)
+	return *rec, nil
+}
+
+// updateSstpPair applies the SSTP patchable-fields whitelist (PRD #154 Q35) to
+// a bidirectional pair record. streamID selects the direction whose Iss/Aud the
+// patch targets (txSid == PairId → primary; rxSid == SstpInbound.Id → inbound).
+//
+// Patchable: SstpMethod.AuthorizationHeader (rotate the static bearer), the
+// targeted direction's Iss and Aud, and peer connectivity fields (EndpointUrl,
+// PeerPairId) ONLY while they are still unset — a staged-rollout fill-in.
+//
+// Immutable (rejected with ErrInvalidRequest, a 400): SstpMethod.Role, an
+// already-set EndpointUrl/PeerPairId, either direction's event_source
+// descriptor, and all IDs. UPDATE never re-triggers the peer cascade
+// — delete-and-recreate is the path for that (Q35a).
+func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.StreamStateRecord, streamID string, patch model.StreamStateRecord) (*model.StreamConfiguration, error) {
+	// Both event_source descriptors are immutable on a pair (issue #296).
+	// Changing one would have to be mirrored to the peer for the two halves to
+	// keep agreeing about where each direction's events come from, and this path
+	// has no cascade. Refused rather than dropped, so an operator learns the
+	// patch did nothing instead of believing it landed; recreate the pair to
+	// change it.
+	if patch.EventSource != nil || patch.InboundEventSource != nil {
+		return nil, fmt.Errorf("%w: invalid patch: sstp event_source is immutable", ErrInvalidRequest)
+	}
+
+	if patch.SstpMethod != nil {
+		if patch.SstpMethod.Role != "" && patch.SstpMethod.Role != streamRec.SstpMethod.Role {
+			return nil, fmt.Errorf("%w: invalid patch: sstp role is immutable", ErrInvalidRequest)
+		}
+		if patch.SstpMethod.AuthorizationHeader != "" {
+			streamRec.SstpMethod.AuthorizationHeader = patch.SstpMethod.AuthorizationHeader
+		}
+		// EndpointUrl and PeerPairId are fill-in-once: a patch may set them while
+		// still unset (staged rollout, Q35a) but never repoint an already-set
+		// value (immutable, Q35).
+		if patch.SstpMethod.EndpointUrl != "" && patch.SstpMethod.EndpointUrl != streamRec.SstpMethod.EndpointUrl {
+			if streamRec.SstpMethod.EndpointUrl != "" {
+				return nil, fmt.Errorf("%w: invalid patch: sstp endpoint_url is immutable once set", ErrInvalidRequest)
+			}
+			if err := validateSstpEndpointUrl(patch.SstpMethod.EndpointUrl); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+			}
+			streamRec.SstpMethod.EndpointUrl = patch.SstpMethod.EndpointUrl
+		}
+	}
+	// tx_allow_plaintext is fill-in-once like the endpoint it governs: a patch
+	// may grant the TLS-floor opt-out (typically in the same patch that fills
+	// in a plaintext endpoint_url) but a partial patch cannot revoke it —
+	// recreate the pair to do that. The floor is then re-checked on the
+	// resulting record (i2goSignals#322).
+	if patch.TxAllowPlaintext {
+		streamRec.TxAllowPlaintext = true
+	}
+	if patch.SstpMethod != nil {
+		if err := validateBusinessStreamTransport(*streamRec); err != nil {
+			return nil, err
+		}
+		if patch.SstpMethod.PeerPairId != "" && patch.SstpMethod.PeerPairId != streamRec.SstpMethod.PeerPairId {
+			if streamRec.SstpMethod.PeerPairId != "" {
+				return nil, fmt.Errorf("%w: invalid patch: sstp peer_pair_id is immutable once set", ErrInvalidRequest)
+			}
+			streamRec.SstpMethod.PeerPairId = patch.SstpMethod.PeerPairId
+		}
+	}
+
+	// Per-direction Iss/Aud patch (Q35): streamID names the targeted direction.
+	// rxSid (== SstpInbound.Id) patches the inbound side; anything else (txSid ==
+	// PairId) patches the primary (tx) side.
+	target := &streamRec.StreamConfiguration
+	if streamRec.SstpInbound != nil && streamID == streamRec.SstpInbound.Id {
+		target = streamRec.SstpInbound
+	}
+	// route_mode, iss, aud and the issuer JWKS URL land on the targeted side
+	// only (#306). The primary is the pair's transmit direction (PB|FW); the
+	// inbound half is its receive direction (IM|FW). The patch is local to this
+	// record — the peer is not told (same as every other pair patch, Q35a).
+	inboundTargeted := target == streamRec.SstpInbound
+	if err := validateRouteModeForRole(patch.RouteMode, !inboundTargeted); err != nil {
+		return nil, err
+	}
+	verifyChanged := applyStreamIdentityPatch(target, patch.StreamConfiguration)
+	// The inbound receive_mode echo states this node's receiving choice, so a
+	// patch that changes that choice moves the echo with it rather than leaving
+	// the pair read contradicting itself (issue #306). A pair bootstrapped
+	// without receive_mode has no echo and gains none. The primary echo is the
+	// peer's choice, which a local patch cannot change.
+	if inboundTargeted && patch.RouteMode != "" && streamRec.InboundReceiveMode != "" {
+		streamRec.InboundReceiveMode = sstpReceiveModeForRouteMode(target.RouteMode)
+	}
+	// The ADR-0066 §D2 invariant holds per direction: a signing-only inbound
+	// half must keep both a trust-root iss and a JWKS URL after the patch.
+	normalizeStreamTrustFields(target)
+	if err := validateBusinessStreamSecurity(*target); err != nil {
+		return nil, err
+	}
+
+	// Per-receiver event-validation mode (spec #247 #250). A pair record always
+	// has an inbound leg, so the single field is honored here and binds to that
+	// inbound leg regardless of which direction streamID names (ADR COM-0018,
+	// story 12). The request value was shape-checked by UpdateStream.
+	applyEventValidation(streamRec, patch.EventValidation)
+
+	// Per-stream ingest durability (issue #343). The single field governs the
+	// pair's inbound (ingest) leg; shape-checked by UpdateStream.
+	applyDurability(streamRec, patch.Durability)
+
+	// Whichever direction the patch names, the pair's transmit direction must
+	// still have an active signing key afterwards when it re-signs (#308).
+	if err := s.RequireActiveSigningKey(ctx, streamRec); err != nil {
+		return nil, err
+	}
+
+	streamRec.ModifiedAt = time.Now()
+	if err := s.streamDAO.Update(ctx, streamRec); err != nil {
+		return nil, err
+	}
+
+	// The pair's receiver-cache entry is keyed by the inbound SID (ADR 0018)
+	// and holds the resolved inbound JWKS; an inbound iss / JWKS URL change is
+	// re-resolved into it so ingest verifies against the new material without
+	// a restart (#306). A tx-side patch does not touch it.
+	if verifyChanged && inboundTargeted {
+		s.refreshReceiverEntry(ctx, streamRec)
+	}
+	config := streamRec.StreamConfiguration
+	return &config, nil
+}
+
+// sstpReceiveModeForRouteMode is the receive_mode word for a receive direction's
+// RouteMode, the inverse of model.SstpReceiveModeToRouteMode. A receive direction
+// only ever holds IM or FW after an update (validateRouteModeForRole), so those
+// are the only two cases.
+func sstpReceiveModeForRouteMode(routeMode string) string {
+	if routeMode == model.RouteModeImport {
+		return model.SstpModeImport
+	}
+	return model.SstpModeForward
+}
+
+// SstpDeleteOutcome reports the per-side result of an SSTP pair delete (Q37,
+// ADR 0020). Local cleanup always proceeds; peer cleanup is courtesy and opt-in.
+// The HTTP handler maps it to 200 (local-only, or local + peer success) or 207
+// Multi-Status (local success but peer cleanup failed).
+type SstpDeleteOutcome struct {
+	// LocalDeleted reports that the local pair row was removed.
+	LocalDeleted bool `json:"local_deleted"`
+	// PeerAttempted reports whether a courtesy peer-cleanup call was made
+	// (cascade_peer=true with a resolvable peer Server).
+	PeerAttempted bool `json:"peer_attempted"`
+	// PeerDeleted reports that the peer accepted the courtesy cleanup.
+	PeerDeleted bool `json:"peer_deleted,omitempty"`
+	// PeerError carries the peer-cleanup failure reason when PeerAttempted is true
+	// and PeerDeleted is false.
+	PeerError string `json:"peer_error,omitempty"`
+}
+
+// PartialFailure reports whether the local delete succeeded but a requested peer
+// cleanup did not — the 207 Multi-Status condition (Q37).
+func (o SstpDeleteOutcome) PartialFailure() bool {
+	return o.LocalDeleted && o.PeerAttempted && !o.PeerDeleted
+}
+
+// DeleteSstpPair removes an SSTP pair (PRD #154 Q37, ADR 0020). Local cleanup
+// ALWAYS proceeds and never blocks on peer reachability. When cascadePeer is
+// true and a peer Server is resolvable, a courtesy DELETE is sent to the peer's
+// SSF stream-configuration endpoint for the peer's PairId; a peer failure does
+// not fail the local delete — it is surfaced in the outcome so the handler can
+// answer 207 Multi-Status.
+func (s *StreamService) DeleteSstpPair(ctx context.Context, sid string, cascadePeer bool, peerServer *model.Server) (SstpDeleteOutcome, error) {
+	invalidateRequestStreams(ctx)
+	rec, err := s.findSstpPairBySIDFresh(ctx, sid)
+	if err != nil {
+		return SstpDeleteOutcome{}, err
+	}
+	if rec == nil {
+		return SstpDeleteOutcome{}, interfaces.ErrNotFound
+	}
+
+	var outcome SstpDeleteOutcome
+	if err := s.DeleteStream(ctx, rec.StreamConfiguration.Id); err != nil {
+		return outcome, err
+	}
+	outcome.LocalDeleted = true
+
+	if !cascadePeer || peerServer == nil {
+		return outcome, nil
+	}
+
+	outcome.PeerAttempted = true
+	if err := s.cascadeSstpPeerDelete(ctx, rec, peerServer); err != nil {
+		outcome.PeerError = err.Error()
+		ssLog.Warn("sstp peer cleanup failed after local delete", "pair_id", rec.PairId, "error", err)
+		return outcome, nil
+	}
+	outcome.PeerDeleted = true
+	return outcome, nil
+}
+
+// cascadeSstpPeerDelete sends a courtesy DELETE to the peer's SSF stream-
+// configuration endpoint for the peer's PairId, using the stored Server
+// credentials (Q37, Q44). It returns an error only on a failed/declined peer
+// call; the caller has already completed the local delete.
+func (s *StreamService) cascadeSstpPeerDelete(ctx context.Context, rec *model.StreamStateRecord, peerServer *model.Server) error {
+	peerPairId := ""
+	if rec.SstpMethod != nil {
+		peerPairId = rec.SstpMethod.PeerPairId
+	}
+	if peerPairId == "" {
+		return errors.New("peer_pair_id unknown; cannot target peer cleanup")
+	}
+
+	client, closeClient, err := oauthClient.GetClientForServer(ctx, peerServer)
+	if err != nil {
+		return fmt.Errorf("failed to get client for peer: %v", err)
+	}
+	defer closeClient()
+
+	endpoint, err := sstpPeerStreamEndpoint(ctx, client, peerServer)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint+"?stream_id="+url.QueryEscape(peerPairId), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to submit peer delete: %v", err)
+	}
+	defer httpSupport.HandleRespClose(resp)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("peer rejected delete with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// findSstpPairBySID resolves sid to its SSTP pair record, whether sid names the
+// tx side (== PairId == document _id) or the rx side (== SstpInbound.Id), or
+// returns nil when sid is not an SSTP pair SID. (Q39, Q41) The error is set only
+// when neither lookup found a record and one of them failed for a reason other
+// than not-found, so whether sid names a stream is unknown (#305).
+func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	return sstpPairBySID(ctx, sid, s.findByID, s.findByInboundSID)
+}
+
+// findSstpPairBySIDFresh is findSstpPairBySID with the request memo bypassed
+// (issue #287). Write paths use it because they MUTATE the record they are
+// handed before persisting it, so they must own a private decode rather than
+// the pointer other readers in the same request are still holding.
+func (s *StreamService) findSstpPairBySIDFresh(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	return sstpPairBySID(ctx, sid, s.streamDAO.FindByID, s.streamDAO.FindByInboundSID)
+}
+
+// sstpPairBySID is the shared resolution order, parameterised by the two
+// lookups so the memoised and fresh forms cannot drift apart.
+func sstpPairBySID(
+	ctx context.Context,
+	sid string,
+	byID func(context.Context, string) (*model.StreamStateRecord, error),
+	byInboundSID func(context.Context, string) (*model.StreamStateRecord, error),
+) (*model.StreamStateRecord, error) {
+	rec, idErr := byID(ctx, sid)
+	if idErr == nil && rec.GetType() == model.DeliverySstpPair {
+		return rec, nil
+	}
+	inbound, inboundErr := byInboundSID(ctx, sid)
+	if inboundErr == nil {
+		return inbound, nil
+	}
+	if idErr == nil {
+		return nil, nil // sid names a stream that is not a pair
+	}
+	if !errors.Is(idErr, interfaces.ErrNotFound) {
+		return nil, idErr
+	}
+	if !errors.Is(inboundErr, interfaces.ErrNotFound) {
+		return nil, inboundErr
+	}
+	return nil, nil
+}
+
+// updateSstpPairStatus applies a status change to an SSTP pair and persists the
+// result. StreamStateRecord.SetStatus moves both halves whichever SID named the
+// pair (#303), so sid only steers the receiver-cache match.
+//
+// The mutation runs under s.mu so that the status fields have ONE locking story
+// across the service: the JWKS paths read and write Status/InboundStatus on a
+// cached record under this mutex, and rec can be that same object — the memory
+// DAO hands back the pointer it stores, and persistDisabledRecord stores a
+// cached record. No interleaving reaching here is known to be live today (a
+// permanently-disabled entry is not a retry candidate, so nothing re-reads it),
+// so this forecloses the hazard rather than fixing a demonstrated race. The DAO
+// round trip then runs off the lock, on a copy taken under it, because this
+// mutex is on the inbound verification path.
+func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid string, w statusWrite) {
+	s.mu.Lock()
+	w.applyTo(rec)
+	// rec is DAO-bound; the receiver cache holds its own copy of the pair
+	// record under the inbound SID, and the retry machinery reads THAT copy.
+	s.applyStatusToReceiverCache(sid, w)
+	persistCopy := *rec
+	s.mu.Unlock()
+
+	if err := s.streamDAO.Update(ctx, &persistCopy); err != nil {
+		ssLog.Error("Error updating sstp pair status", "sid", sid, "error", err)
+	}
+}
+
+// resolveSstpDirectionEvents is resolveStreamEvents for ONE leg of an SSTP pair,
+// with the absent-means-everything normalization deliberately withheld.
+//
+// resolveStreamEvents reads an omitted events_requested as "everything you
+// support", which is right for SSF registration: SSF 1.0 §7.1.1 makes the field
+// optional, and the party omitting it is the RECEIVER asking to be sent things.
+// An SSTP bootstrap is the opposite situation — the local operator is describing
+// what this side will forward, and `goSignals create stream sstp` leaves
+// --events optional with no default — so reading silence as consent would start
+// forwarding the entire catalog, including the SCIM full-resource event types
+// whose payload carries a complete resource, to a peer that asked for nothing.
+//
+// The direction therefore forwards nothing until an operator names events, which
+// is what it did before spec #247. The WARN is what makes that visible rather
+// than mysterious.
+func resolveSstpDirectionEvents(pairId, direction string, requested, supported []string) (events []string, delivered []string) {
+	if len(requested) == 0 {
+		ssLog.Warn("SSTP pair direction names no event types and will forward nothing; "+
+			"set --events to choose what it carries",
+			"pairId", pairId, "direction", direction)
+		return nil, nil
+	}
+	return resolveStreamEvents(requested, supported)
+}
+
+// buildSstpRecord assembles the bidirectional StreamStateRecord from a validated
+// bootstrap. The tx (primary) side aliases its Id to the Mongo _id hex (== the
+// PairId), preserving the existing aliasing invariant; the inbound side uses the
+// caller-provided inboundSid so the SID the pair bearer authorizes and the SID
+// persisted on SstpInbound are the same value (finding #7).
+//
+// It does not go through applyEventSource, the shared push/poll helper that drops
+// a descriptor with a WARN on a receiver stream. That helper is keyed on
+// IsReceiver(), which reads the primary Delivery method and so is false for a
+// pair (its marker is DeliverySstp, neither ReceivePush nor ReceivePoll) — and
+// the SSTP create and update paths are separate branches that never call it. So a
+// pair keeps both of its descriptors, which is the intended answer for a record
+// that is transmitter and receiver at once (issue #296).
+func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, projectID string, b model.SstpPairBootstrap, endpointUrl, authHeader string) *model.StreamStateRecord {
+	now := time.Now()
+
+	// This node is the transmitting end of the primary direction and the
+	// receiving end of the inbound one. The transmitting end takes mode; the
+	// receiving end takes receive_mode when the bootstrap carries it and mirrors
+	// mode when it does not, which is exactly what it stored before the field
+	// existed (issue #306). The primary's receive_mode belongs to the peer's
+	// receiving end and reaches it through mirrorSstpBootstrap.
+	primaryMode, _ := model.SstpModeToRouteMode(b.Primary.Mode)
+	inboundMode := b.Inbound.ReceiveRouteMode()
+
+	supported := model.GetSupportedEvents()
+	primaryRequested, primaryDelivered := resolveSstpDirectionEvents(pairId, "primary", b.Primary.Events, supported)
+	inboundRequested, inboundDelivered := resolveSstpDirectionEvents(pairId, "inbound", b.Inbound.Events, supported)
+
+	primary := model.StreamConfiguration{
+		Id:              pairId,
+		Iss:             b.Primary.Iss,
+		Aud:             b.Primary.Aud,
+		IssuerJWKSUrl:   b.Primary.IssJwksUrl,
+		EventsSupported: supported,
+		EventsRequested: primaryRequested,
+		EventsDelivered: primaryDelivered,
+		Description:     b.Description,
+		Format:          CSubjectFmt,
+		RouteMode:       primaryMode,
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			SstpTransmitMarker: &model.SstpTransmitMarker{Method: model.DeliverySstp},
+		},
+		// The TLS-floor opt-out lives on the primary (transmit) half: that is
+		// the StreamConfiguration the SSTP dialer reads for the outbound leg.
+		TxAllowPlaintext: b.TxAllowPlaintext,
+	}
+
+	inbound := model.StreamConfiguration{
+		Id:              inboundSid,
+		Iss:             b.Inbound.Iss,
+		Aud:             b.Inbound.Aud,
+		IssuerJWKSUrl:   b.Inbound.IssJwksUrl,
+		EventsSupported: supported,
+		EventsRequested: inboundRequested,
+		EventsDelivered: inboundDelivered,
+		Description:     b.Description,
+		Format:          CSubjectFmt,
+		RouteMode:       inboundMode,
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			SstpReceiveMarker: &model.SstpReceiveMarker{Method: model.ReceiveSstp},
+		},
+	}
+
+	return &model.StreamStateRecord{
+		Id:                  mid,
+		ProjectId:           projectID,
+		StreamConfiguration: primary,
+		SstpInbound:         &inbound,
+		PairId:              pairId,
+		SstpMethod: &model.SstpMethod{
+			Role:                b.Role,
+			EndpointUrl:         endpointUrl,
+			AuthorizationHeader: authHeader,
+			PeerPairId:          b.PeerPairId,
+			// Persist the bootstrap's PeerServerAlias so the SSTP dialer's
+			// credential-chain helper can honor operator-configured TLS/OAuth
+			// transport posture per pair (PRD 49 slice 2b, AC 4).
+			PeerServerAlias: b.PeerServerAlias,
+		},
+		StartDate:     now,
+		CreatedAt:     now,
+		ModifiedAt:    now,
+		Status:        model.StreamStateEnabled,
+		InboundStatus: model.StreamStateEnabled,
+
+		// Each direction's ADR 0004 descriptor lands on the half it describes
+		// (issue #296). The primary's is the record-level EventSource, which is
+		// what MatchesStream reads when deciding what this pair transmits; the
+		// inbound's is the InboundEventSource twin, which this node stores and
+		// mirrors but never routes on, because the transmitting end of that
+		// logical stream is the peer. DeepCopy so the stored record does not
+		// alias the caller's request body.
+		EventSource:        b.Primary.EventSource.DeepCopy(),
+		InboundEventSource: b.Inbound.EventSource.DeepCopy(),
+
+		// Each direction's receive_mode is echoed as bootstrapped so the pair read
+		// can show both ends of a direction (issue #306). Empty stays empty, and is
+		// omitted from the wire.
+		ReceiveMode:        b.Primary.ReceiveMode,
+		InboundReceiveMode: b.Inbound.ReceiveMode,
+	}
+}
+
+// cascadeSstpPeer POSTs the mirrored bootstrap to the peer's SSF stream
+// configuration endpoint using the stored Server credentials (Q31, Q44). The
+// mirror flips the role and swaps the two directions so that the peer's primary
+// (tx) is this node's inbound (rx) and vice-versa. On success the peer's PairId
+// is recorded on the local record's SstpMethod.PeerPairId.
+func (s *StreamService) cascadeSstpPeer(ctx context.Context, rec *model.StreamStateRecord, b model.SstpPairBootstrap, peerServer *model.Server) error {
+	mirror := mirrorSstpBootstrap(rec, b)
+
+	client, closeClient, err := oauthClient.GetClientForServer(ctx, peerServer)
+	if err != nil {
+		return fmt.Errorf("failed to get client for peer: %v", err)
+	}
+	defer closeClient()
+
+	endpoint, err := sstpPeerStreamEndpoint(ctx, client, peerServer)
+	if err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(mirror)
+	if err != nil {
+		return fmt.Errorf("failed to marshal mirrored bootstrap: %v", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to submit mirrored bootstrap to peer: %v", err)
+	}
+	defer httpSupport.HandleRespClose(resp)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("peer rejected mirrored bootstrap with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var peerRec model.StreamStateRecord
+	if err := json.NewDecoder(resp.Body).Decode(&peerRec); err != nil {
+		return fmt.Errorf("failed to decode peer bootstrap response: %v", err)
+	}
+
+	// Learn the peer's PairId and, on an initiator, the endpoint/bearer the peer
+	// responder produced.
+	rec.SstpMethod.PeerPairId = peerRec.PairId
+	if b.Role == model.SstpRoleInitiator && peerRec.SstpMethod != nil {
+		if rec.SstpMethod.EndpointUrl == "" {
+			rec.SstpMethod.EndpointUrl = peerRec.SstpMethod.EndpointUrl
+		}
+	}
+	return nil
+}
+
+// mirrorSstpBootstrap builds the bootstrap the peer should receive: the opposite
+// role and the two directions swapped, so the peer's outbound is this node's
+// inbound. The peer's responder will derive its own EndpointUrl and mint its own
+// bearer; an initiator-bound mirror carries this responder's endpoint+bearer.
+//
+// The swap is whole-struct, so a per-direction event_source (issue #296) crosses
+// with the direction that owns it and needs no handling of its own here. That is
+// the point of the descriptor being a field of SstpDirection: this node's inbound
+// event_source is exactly what the peer's primary should route on, and the swap
+// puts it there. Keep the swap struct-level if this function is ever rewritten —
+// copying fields individually would silently drop it.
+//
+// receive_mode (issue #306) rides the same swap. This node's primary.receive_mode
+// is the choice for the peer's receiving end, and the swap delivers it as the
+// peer's inbound.receive_mode, which the peer's buildSstpRecord writes to its
+// SstpInbound.RouteMode. A direction without the field marshals without the key,
+// so the mirror of such a bootstrap is byte-for-byte what it was before.
+func mirrorSstpBootstrap(rec *model.StreamStateRecord, b model.SstpPairBootstrap) model.SstpPairBootstrap {
+	mirror := model.SstpPairBootstrap{
+		Description: b.Description,
+		PeerPairId:  rec.PairId,
+		// The TLS-floor opt-out is a property of the pair: whichever side ends
+		// up the initiator dials the same endpoint, so the mirror carries it.
+		TxAllowPlaintext: b.TxAllowPlaintext,
+		// Swap directions: peer's primary (tx) == our inbound (rx).
+		Primary: b.Inbound,
+		Inbound: b.Primary,
+	}
+	if b.Role == model.SstpRoleResponder {
+		// This node is the responder/HTTP server; the peer is the initiator/client.
+		// Hand the peer the endpoint and bearer it must use to reach us.
+		mirror.Role = model.SstpRoleInitiator
+		mirror.EndpointUrl = rec.SstpMethod.EndpointUrl
+		mirror.AuthorizationHeader = rec.SstpMethod.AuthorizationHeader
+	} else {
+		// This node is the initiator/client; the peer is the responder/server and
+		// will derive its own endpoint and mint its own bearer.
+		mirror.Role = model.SstpRoleResponder
+	}
+	return mirror
+}
+
+// sstpPeerStreamEndpoint resolves the peer's SSF stream-configuration endpoint
+// (the URL the mirrored bootstrap is POSTed to). It fetches the peer's
+// well-known SSF configuration via the already-credentialed client and returns
+// its configuration_endpoint.
+func sstpPeerStreamEndpoint(ctx context.Context, client *http.Client, peerServer *model.Server) (string, error) {
+	txConfig, err := wellKnownSupport.FetchSSFConfiguration(ctx, client, peerServer.Host)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch peer ssf configuration: %v", err)
+	}
+	if txConfig.ConfigurationEndpoint == "" {
+		return "", errors.New("peer ssf configuration missing configuration_endpoint")
+	}
+	return txConfig.ConfigurationEndpoint, nil
+}
+
+// sessionFromCtx extracts the issuing AuthContext from the request context so a
+// minted pair token records its lineage parent, mirroring CreateStream. Returns
+// nil when no auth context is present (e.g. unit tests).
+func sessionFromCtx(ctx context.Context) *authSupport.AuthContext {
+	v := ctx.Value("authCtx")
+	if v == nil {
+		return nil
+	}
+	if authCtx, ok := v.(*authSupport.AuthContext); ok {
+		return authCtx
+	}
+	return nil
+}

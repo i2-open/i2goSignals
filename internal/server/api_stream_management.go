@@ -10,18 +10,22 @@ Because of this, administrative access is via admin.go
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/subjectid"
 
@@ -87,7 +91,8 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	// When the token is bound to a specific stream it must match the request;
 	// the handler always operates on that stream (same rule as VerificationRequest).
-	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+	// A stream-bound token may also name only its own bound streams (#303).
+	if !authCtx.BoundTokenPermits(req.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != req.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -98,6 +103,18 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
 	if err != nil {
+		// SSTP slice 11 (PRD #154 Q45): subject filters live on the transmit
+		// (outbound) side only. GetStreamState keys on the tx-side SID (== _id),
+		// so a NOT-FOUND here may be an SSTP pair's rxSid (the receive/inbound
+		// direction). Inbound SSTP events are trusted to be pre-filtered by the
+		// peer — there is no local ingest-time filter — so an Add/Remove against
+		// the rxSid is rejected with peer-API guidance rather than a bare 404.
+		if pair, inboundErr := sa.GetStreamService().GetStreamStateByInboundSID(r.Context(), req.StreamId); inboundErr == nil &&
+			pair.GetType() == model.DeliverySstpPair && pair.SstpInbound != nil && pair.SstpInbound.Id == req.StreamId {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_request","error_description":"This stream_id names the receive (inbound) side of an SSTP pair; subject filters apply to the transmit side only. Manage subjects on the upstream peer that emits to this side by calling its add-subject/remove-subject endpoint against its transmit-side stream_id (the peer's txSid)."}`))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -173,6 +190,40 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 }
 
+// writeStreamNotFoundOrFault answers a stream handler whose lookup or update of
+// sid failed with err (#305). 404 means only that no such stream exists; its
+// body is notFoundBody when one is given. Anything else, including a rejection
+// that carries services.ErrInvalidRequest, is answered by
+// writeInvalidRequestOrFault.
+func writeStreamNotFoundOrFault(w http.ResponseWriter, err error, op, sid, notFoundBody string) {
+	if errors.Is(err, interfaces.ErrNotFound) && !errors.Is(err, services.ErrInvalidRequest) {
+		serverLog.Debug(op+": stream not found", "sid", sid)
+		if notFoundBody != "" {
+			http.Error(w, notFoundBody, http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	writeInvalidRequestOrFault(w, err, op, "sid", sid)
+}
+
+// writeInvalidRequestOrFault answers a handler whose service call failed with
+// err (#305). A request the caller can fix carries services.ErrInvalidRequest
+// and is the documented 400 with the rejection as its body (SSF s8.1.1.1).
+// Anything else is an unexpected server condition (RFC 9110 s15.6.1): it is
+// logged at WARN as op failing, with attrs and the error= field, and answered
+// 500 with no body, so store and peer error text never reaches the caller.
+func writeInvalidRequestOrFault(w http.ResponseWriter, err error, op string, attrs ...any) {
+	if errors.Is(err, services.ErrInvalidRequest) {
+		serverLog.Debug(op+" refused", append(attrs, "error", err)...)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	serverLog.Warn(op+" failed", append(attrs, "error", err)...)
+	w.WriteHeader(http.StatusInternalServerError)
+}
+
 // GetStatus retrieves the status of a stream.
 //
 // Inputs:
@@ -209,8 +260,7 @@ func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 
 	streamStatus, err := sa.GetStreamService().GetStatus(r.Context(), sid)
 	if err != nil {
-		serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
-		w.WriteHeader(http.StatusNotFound)
+		writeStreamNotFoundOrFault(w, err, "GetStatus: reading stream status", sid, "")
 		return
 	}
 
@@ -284,31 +334,59 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	state, err := sa.GetStreamService().GetStreamState(r.Context(), authContext.StreamId)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+		writeStreamNotFoundOrFault(w, err, "StreamDelete: reading stream state", authContext.StreamId, "")
 		return
 	}
+
+	// SSTP pair delete (ADR 0020, Q37): an SSTP pair is removed via DeleteSstpPair
+	// so the local rows for BOTH directions are cleaned up and — when
+	// cascade_peer=true and the peer Server is resolvable — a courtesy DELETE is
+	// cascaded to the peer. Local cleanup always succeeds; a peer-cleanup failure
+	// answers 207 Multi-Status with per-side outcomes rather than failing the call.
+	if state.GetType() == model.DeliverySstpPair {
+		deleteSstpPairHandler(sa, w, r, authContext.StreamId)
+		return
+	}
+
 	state.Status = model.StreamStateDisable
 	sa.GetEventRouter().UpdateStreamState(state)
 
-	// Stop all the inbound traffic if Polling
+	// Gracefully stop a polling receiver and wait for its in-flight poll to drain
+	// BEFORE the remote-delete cascade, so the receiver is not mid-poll against the
+	// transmitter while the cascade discovers/deletes the same stream — concurrent
+	// calls would otherwise race (and some transmitters serialize per-stream
+	// requests). Unlike CloseReceiver this does not tear the current poll request.
+	sa.DrainReceiver(authContext.StreamId)
+
+	// For a receiver stream auto-registered against a foreign transmitter, delete
+	// the remote stream too (SSF §8.1.1.5). Best-effort: the stream's transmitter
+	// credentials/TLS settings are still available on `state`; a remote failure is
+	// logged but never blocks local deletion.
+	sa.CascadeReceiverStreamDelete(r.Context(), state)
+
+	// The teardown and the store delete run under the stream-table lock: a
+	// stream-table sync between them would read the stream from the store and
+	// start it again (#350).
+	unlock := lockStreamTable(sa)
+
+	// Final teardown of the (now-drained) receiver and its bookkeeping. The
+	// context-cancel here is a no-op when the poll goroutine already exited.
 	sa.CloseReceiver(authContext.StreamId)
 
 	// Stop any outbound activity
 	sa.GetEventRouter().RemoveStream(authContext.StreamId)
 
 	err = sa.GetStreamService().DeleteStream(r.Context(), authContext.StreamId)
+	unlock()
 	if err != nil {
-		if err.Error() == "not found" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		writeStreamNotFoundOrFault(w, err, "StreamDelete: deleting stream", authContext.StreamId, "")
 		return
 	}
+	notifyStreamChanged(sa, authContext.StreamId)
 	// sa.EventRouter.RemoveStream(authContext)
-	w.WriteHeader(http.StatusOK)
+	// SSF 1.0 §8.1.5 Stream Configuration Delete: a successful delete answers
+	// 204 No Content (the response carries no body).
+	w.WriteHeader(http.StatusNoContent)
 	serverLog.Info(fmt.Sprintf("Stream %s inactivated and deleted.", authContext.StreamId))
 }
 
@@ -385,7 +463,12 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
+	// The credential holder (a delivery EAT) must be able to read its OWN
+	// stream's config so it can rotate-on-GET, so event-delivery scope is accepted
+	// alongside the management/admin scopes (ADR 0022 — the narrow data-plane
+	// carve-out: a delivery token may read only its own stream's config; the EAT's
+	// stream binding, enforced by ValidateAuthorizationAny, confines it).
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -397,7 +480,19 @@ func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 		return
 	}
 
-	config, err := sa.GetStreamService().GetStream(r.Context(), authCtx.StreamId)
+	// Rotate-on-GET (ADR 0022 §1): when the caller proves possession of the
+	// stream's current server-issued bearer (and the gate is on), mint a
+	// replacement, persist it, and return the LIVE new value below. reveal is also
+	// true on the lost-response recovery re-read (ADR 0022 §2), which returns the
+	// same current bearer live. Any other authorized reader gets the masked value.
+	// presentedEat is the validated local EAT (nil for an OAuth/STS caller, which
+	// never rotates).
+	var presentedEat *authSupport.EventAuthToken
+	if authCtx != nil {
+		presentedEat = authCtx.Eat
+	}
+	rec, reveal, err := sa.GetStreamService().RotateBearerOnGet(
+		r.Context(), authCtx.StreamId, r.Header.Get("Authorization"), presentedEat, sa.GetTokenService())
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -406,7 +501,16 @@ func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	serverLog.Debug(fmt.Sprintf("Stream Config Get Request %s", authCtx.StreamId))
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	resp, err := json.Marshal(adjustBaseUrl(sa, *config))
+	// When reveal is set, return the LIVE config (the new/current bearer — one of
+	// its two live appearances). Otherwise mask every credential field
+	// unconditionally (ADR 0022 §3) — masking applies to a deep copy, never the
+	// stored record.
+	config := rec.StreamConfiguration
+	if !reveal {
+		config = config.MaskCredentials()
+	}
+
+	resp, err := json.Marshal(adjustBaseUrl(sa, config))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -441,7 +545,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 // alone is deliberately not enough. It routes through HasScope (never a bare
 // authCtx.Eat check) so an OAuth/STS caller — whose Eat is nil and whose grants
 // live in GrantedScopes — is evaluated correctly rather than always denied (#128).
-func canProvisionTxAlias(authCtx *authUtil.AuthContext) bool {
+func canProvisionTxAlias(authCtx *authSupport.AuthContext) bool {
 	if authCtx.HasScope(authSupport.ScopeStreamAdmin) {
 		return true
 	}
@@ -462,13 +566,30 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(status)
 		return
 	}
+	// Read the body once so it can be discriminated between the SSF
+	// StreamConfiguration shape and the SSTP SstpPairBootstrap shape (ADR 0019).
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// POST /stream accepts a second body shape, SstpPairBootstrap, discriminated
+	// on shape alongside the existing StreamConfiguration (ADR 0019). An SSTP
+	// bootstrap is expanded into a bidirectional pair via CreateSstpPair; the
+	// mirror is cascaded to the peer when peer_server_alias is supplied. This is
+	// the create-side wiring of the discriminator the ADR specifies.
+	if model.IsSstpBootstrapBody(body) {
+		createSstpPairHandler(sa, w, r, authCtx, body)
+		return
+	}
+
 	// Decode into a StreamStateRecord (not a bare StreamConfiguration) so the
 	// goSignals-specific subject-filtering operator knobs ride alongside the
 	// SSF wire-format fields. The embedded StreamConfiguration is flattened by
 	// encoding/json, so existing request bodies decode unchanged.
 	var jsonRequest model.StreamStateRecord
-	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
-	if err != nil {
+	if err := json.Unmarshal(body, &jsonRequest); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -489,15 +610,9 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authUtil.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
+	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
 	if err != nil {
-		if err.Error() == "not found" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		writeStreamNotFoundOrFault(w, err, "StreamCreate: creating stream", "", "")
 		return
 	}
 
@@ -508,6 +623,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	sa.GetEventRouter().UpdateStreamState(state)
 	sa.HandleReceiver(state)
+	notifyStreamChanged(sa, configResp.Id)
 
 	serverLog.Info(fmt.Sprintf("Stream %s CREATED", configResp.Id))
 
@@ -523,6 +639,122 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 }
 
+// deleteSstpPairHandler is the delete-side dispatch for an SSTP pair on
+// DELETE /stream (ADR 0020, Q37). It removes BOTH local direction rows and, when
+// cascade_peer=true and peer_server_alias resolves a stored Server, cascades a
+// courtesy DELETE to the peer. Local cleanup always succeeds. The response is
+// 200 (local-only, or local + peer success) or 207 Multi-Status (local success
+// but peer cleanup failed), carrying the per-side SstpDeleteOutcome.
+func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, sid string) {
+	q := r.URL.Query()
+	cascadePeer := strings.EqualFold(q.Get("cascade_peer"), "true")
+
+	var peerServer *model.Server
+	if cascadePeer {
+		if alias := q.Get("peer_server_alias"); alias != "" {
+			if resolved, err := sa.GetServerService().GetServerByAlias(r.Context(), alias); err == nil {
+				peerServer = resolved
+			} else {
+				serverLog.Warn("SSTP delete: peer_server_alias did not resolve", "alias", alias, "error", err)
+			}
+		}
+	}
+
+	// Stop any in-flight delivery for the tx side before the rows are removed.
+	sa.GetEventRouter().RemoveStream(sid)
+
+	outcome, err := sa.GetStreamService().DeleteSstpPair(r.Context(), sid, cascadePeer, peerServer)
+	if err != nil {
+		writeStreamNotFoundOrFault(w, err, "SSTP delete: deleting pair", sid, "")
+		return
+	}
+
+	notifyStreamChanged(sa, sid)
+
+	status := http.StatusOK
+	if outcome.PartialFailure() {
+		// Local delete succeeded but the requested peer cleanup did not.
+		status = http.StatusMultiStatus
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	respBytes, mErr := json.MarshalIndent(outcome, "", "  ")
+	if mErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(respBytes)
+	serverLog.Info("SSTP pair DELETED", "sid", sid, "cascade_peer", cascadePeer, "status", status)
+}
+
+// createSstpPairHandler is the create-side dispatch for an SstpPairBootstrap body
+// on POST /stream (ADR 0019). It expands the bootstrap into a bidirectional pair
+// via CreateSstpPair (which cascades the mirror to the peer over real HTTP when
+// peer_server_alias resolves a stored Server), starts the SSTP runner for the
+// new pair, and returns the full StreamStateRecord (PairId, SstpInbound, and
+// SstpMethod) so the caller — and a cascading peer — can learn the pair SIDs,
+// the derived EndpointUrl, and the minted bearer.
+func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext, body []byte) {
+	var bootstrap model.SstpPairBootstrap
+	if err := json.Unmarshal(body, &bootstrap); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// An SSTP pair-create that cascades to a FOREIGN peer (peer_server_alias set)
+	// resolves a stored peer credential and remotely provisions the mirror on
+	// another node — the same elevated-trust operation as tx_alias foreign
+	// provisioning, so the base stream/reg gate on StreamCreateHandler is not
+	// enough — it needs canProvisionTxAlias (admin, or the full reg+stream+event
+	// set). A purely-local bootstrap (no peer_server_alias) in EITHER role is an
+	// ordinary business stream and stays at stream scope: the bearer a local
+	// responder mints is bound to the pair's own two SIDs, exactly like the
+	// per-stream bearer a push receiver mints at stream scope. Reuse the
+	// tx_alias predicate so the two foreign-provisioning paths share one policy
+	// (ADR 0009, ADR 0019).
+	if bootstrap.PeerServerAlias != "" && !canProvisionTxAlias(authCtx) {
+		serverLog.Warn("SSTP pair create: denied foreign provisioning; needs admin or reg+stream+event",
+			"role", bootstrap.Role, "peer_server_alias", bootstrap.PeerServerAlias, "projectId", authCtx.ProjectId)
+		http.Error(w, "creating an SSTP pair that cascades to a peer requires admin scope, or the full reg+stream+event scope set", http.StatusForbidden)
+		return
+	}
+
+	rec, err := sa.GetStreamService().CreateSstpPair(
+		context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx),
+		bootstrap, authCtx.ProjectId, nil)
+	if err != nil {
+		// A bootstrap the caller can fix is the documented 400 (SSF s8.1.1.1);
+		// anything else — a token mint, a store write, a peer this server could
+		// not reach — is an unexpected server condition and a 500 (RFC 9110
+		// s15.6.1). Reporting a server fault as 400 tells the caller to fix a
+		// request that was never the problem. Unlike StreamCreate there is no
+		// 404 branch: an unregistered peer_server_alias is a 400, never
+		// stream-not-found. A fault logs at WARN, not ERROR (CONTEXT.md
+		// log-level policy): the usual cause is a peer cascade that failed on
+		// this one attempt, which the caller can retry.
+		writeInvalidRequestOrFault(w, err, "SSTP pair create", "role", bootstrap.Role)
+		return
+	}
+
+	// Start the SSTP-client runner (initiator) / register the responder side so
+	// the pair begins serving immediately, mirroring the StreamConfiguration path.
+	sa.GetEventRouter().UpdateStreamState(&rec)
+	notifyStreamChanged(sa, rec.StreamConfiguration.Id)
+
+	serverLog.Info("SSTP pair CREATED", "pairId", rec.PairId, "role", bootstrap.Role)
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	respBytes, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write(respBytes)
+}
+
 // StreamUpdate updates (replaces or patches) an existing stream configuration.
 //
 // Inputs:
@@ -534,7 +766,8 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 //   - 200 OK: JSON object of the updated StreamConfiguration.
 //
 // Errors:
-//   - 400 Bad Request: Missing stream ID or error decoding request body.
+//   - 400 Bad Request: Missing stream ID, error decoding request body, or an
+//     update the stream cannot accept (the body carries the rejection).
 //   - 401/403: Unauthorized access.
 //   - 404 Not Found: Stream not found.
 //   - 500 Internal Server Error: Database update failure.
@@ -559,48 +792,79 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check.
+	// SSF identifies the target stream by the stream_id query parameter, surfaced
+	// here as authCtx.StreamId. PUT/PATCH instead carry the full StreamConfiguration
+	// in the body, where stream_id is a field, so receivers that omit the query
+	// parameter (e.g. the OpenID conformance suite) leave authCtx.StreamId empty.
+	// Fall back to the body's stream_id in that case. Earlier SSF drafts encoded
+	// the stream id in the token, which is why authCtx.StreamId exists at all.
+	//
+	// A stream-bound token operates only on its bound streams (#303): a body
+	// stream_id outside the binding, or other than the stream the request
+	// resolved to (including via the token fallback), is refused rather than
+	// silently applied to another stream. An unbound token keeps the rule
+	// above: the parameter's stream wins over the body.
+	if !authCtx.BoundTokenPermits(jsonRequest.StreamConfiguration.Id) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	streamId := authCtx.StreamId
+	if streamId == "" {
+		streamId = jsonRequest.StreamConfiguration.Id
+	}
+
 	// Use IsAuthorizedForStream (not a bare Eat check) so local tokens keep their stream-id binding while
 	// OAuth/STS callers — who carry no per-stream binding — are still validated against the granted scope set.
-	if !authCtx.IsAuthorizedForStream(jsonRequest.StreamConfiguration.Id, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin) {
+	if !authCtx.IsAuthorizedForStream(streamId, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
+
+	// Read-edit-write protection (ADR 0022 §3): credentials are masked to the
+	// sentinel on every read, so an UPDATE body that echoes a masked credential
+	// must NOT clobber the stored live value. Restore any sentinel-marked
+	// credential field from the stored record before the update is applied.
+	//
+	// Every lookup in this handler resolves the SID the way UpdateStream does
+	// (#303): an SSTP pair's rx-side SID is not its document _id, so an _id
+	// lookup found nothing. The merge was then skipped, letting an echoed mask
+	// overwrite the pair's peer bearer, and the refresh below handed
+	// HandleReceiver a nil record.
+	if stored, sErr := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId); sErr == nil && stored != nil {
+		jsonRequest.MergeUnchangedCredentials(stored)
+	}
+
 	resetJti := jsonRequest.ResetJti
 	resetDate := jsonRequest.ResetDate
 
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetStreamService().UpdateStream(r.Context(), authCtx.StreamId, authCtx.ProjectId, jsonRequest)
-	if err != nil || configResp == nil {
-		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
+	configResp, err := sa.GetStreamService().UpdateStream(r.Context(), streamId, authCtx.ProjectId, jsonRequest)
+	if err != nil {
+		if err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
 			return
 		}
-		if err != nil && err.Error() == "not found" || configResp == nil {
-			http.Error(w, "No stream found", http.StatusNotFound)
-			return
-		}
+		// An update the stream cannot accept (a delivery-method change, an
+		// immutable SSTP field, a bad signing_alg, route_mode, grace value or
+		// subject_filter_mode) is a 400 carrying the rejection (#305, #306);
+		// 404 only for a missing stream; anything else, such as a store failure
+		// while writing the update, is a server fault (#305).
+		writeStreamNotFoundOrFault(w, err, "StreamUpdate: updating stream", streamId, "No stream found")
+		return
+	}
+	if configResp == nil {
+		serverLog.Error("StreamUpdate: update returned no configuration", "sid", streamId)
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
-	if err != nil {
-		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
-	}
 	if resetDate != nil || resetJti != "" {
-		// reset the stream to a particular date
-		err := sa.GetEventService().ResetEventStream(r.Context(), authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
-			// Operational events (verify, stream-updated) are point-to-point and excluded from replay.
-			if eventRecord.Operational {
-				return false
-			}
-			// Because reset goes through all events, this function confirms the stream should get the event
-			return sa.GetEventService().MatchesStream(streamState, eventRecord)
-		})
+		// Reset the stream to a JTI or a date through the router, which
+		// queues it while delivery waits for the legacy deliveries migration
+		// (#361).
+		err := sa.GetEventRouter().ReplayStream(r.Context(), streamId, resetJti, resetDate)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -612,17 +876,22 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Update the event router
-	state, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+	state, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId)
 	if err != nil {
-		serverLog.Error("Error getting stream state for event router update", "id", authCtx.StreamId, "error", err)
+		serverLog.Error("Error getting stream state for event router update", "id", streamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
-		sa.GetEventRouter().RemoveStream(authCtx.StreamId)
+		sa.GetEventRouter().RemoveStream(streamId)
 	}
-	sa.GetEventRouter().UpdateStreamState(state)
-	sa.HandleReceiver(state)
+	// The update is already stored; a failed re-read skips the refresh rather
+	// than passing HandleReceiver a nil record.
+	if state != nil {
+		sa.GetEventRouter().UpdateStreamState(state)
+		sa.HandleReceiver(state)
+	}
+	notifyStreamChanged(sa, streamId)
 
-	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", authCtx.StreamId))
+	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", streamId))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	respBytes, err := json.MarshalIndent(adjustBaseUrl(sa, *configResp), "", "  ")
@@ -646,7 +915,8 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 //   - 200 OK: JSON object containing the updated status.
 //
 // Errors:
-//   - 400 Bad Request: Missing stream ID or error decoding request body.
+//   - 400 Bad Request: Missing stream ID, error decoding request body, or a
+//     re-enable of a signing transmitter with no active signing key (#308).
 //   - 401/403: Unauthorized access.
 //   - 404 Not Found: Stream not found.
 //   - 500 Internal Server Error: Database or internal update failure.
@@ -673,15 +943,22 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The prefix marks a push runner's own pause, which a lease takeover ends;
+	// an operator's reason carrying it would be taken for one.
+	if strings.HasPrefix(jsonRequest.Reason, eventRouter.PushRunnerReasonPrefix) {
+		http.Error(w, "reason may not start with "+strconv.Quote(eventRouter.PushRunnerReasonPrefix), http.StatusBadRequest)
+		return
+	}
 	modified := false
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+	// Resolve the SID the way GetStatus does (#303): GetStreamState is a document
+	// _id lookup, so the inbound SID of an SSTP pair 404'd here while GET /status
+	// read it. GetStreamStateBySID routes a pair by either direction and falls
+	// through to the same _id lookup for every other stream.
+	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 	if err != nil {
-		if err.Error() == "not found" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		// WARN, not ERROR, deliberately (CONTEXT.md log-level policy): a store
+		// read failure here is answered 500 and the caller can retry.
+		writeStreamNotFoundOrFault(w, err, "UpdateStatus: reading stream state", authCtx.StreamId, "")
 		return
 	}
 	if streamState == nil {
@@ -690,13 +967,28 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	if jsonRequest.Status == model.StreamStateEnabled {
+		// A re-enable runs the save-time signing-key check (#308): a signing
+		// transmitter with no active key for its iss and signing_alg stays as it
+		// is and the caller is told which key is missing.
+		if err := sa.GetStreamService().RequireActiveSigningKey(r.Context(), streamState); err != nil {
+			// A key-store failure logs at WARN, not ERROR, deliberately (CONTEXT.md
+			// log-level policy): it is answered 500 and the caller can retry.
+			writeInvalidRequestOrFault(w, err, "UpdateStatus: checking the signing key before a re-enable", "sid", authCtx.StreamId)
+			return
+		}
+	}
 	if jsonRequest.Status != "" {
-		if streamState.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, streamState.ErrorMsg) {
+		// Judge "no change" against what the write would do (#303): on an SSTP
+		// pair it moves both halves whichever SID is named, so it is a change
+		// when EITHER half differs (a legacy split record heals); any other
+		// stream is judged on its one status.
+		if streamState.IsStatusChange(jsonRequest.Status, jsonRequest.Reason) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
 				sa.GetStreamService().UpdateStreamStatus(r.Context(), authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true
 				// Refresh streamState after update
-				updatedState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+				updatedState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 				if err == nil && updatedState != nil {
 					streamState = updatedState
 				}
@@ -708,13 +1000,16 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if modified {
 		sa.GetEventRouter().UpdateStreamState(streamState)
 		sa.HandleReceiver(streamState)
+		// The peers apply the new status too: a pause or disable must stop the
+		// runner wherever it runs, and a re-enable start one wherever the lease
+		// lands.
+		notifyStreamChanged(sa, authCtx.StreamId)
 	}
 
 	statusResp, err := sa.GetStreamService().GetStatus(r.Context(), authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting status after update", "id", authCtx.StreamId, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
@@ -751,12 +1046,14 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 			model.DeliveryPush,
 			model.ReceivePoll,
 			model.ReceivePush,
+			model.DeliverySstp,
 		}
 	default:
 		goVersion = "" // Simulate an SSF server
 		methods = []string{
 			model.DeliveryPoll,
 			model.DeliveryPush,
+			model.DeliverySstp,
 		}
 	}
 
@@ -783,9 +1080,9 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 			{SpecUrn: constants.BearerAuth},
 			{SpecUrn: constants.RFC6749},
 		},
-		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
-		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeRegister},
-		BearerMethodsSupported: []string{"header"},
+		// OAuth authorization_servers / scopes_supported / bearer_methods_supported
+		// are advertised via RFC 9728 Protected Resource Metadata
+		// (/.well-known/oauth-protected-resource), not in the SSF discovery doc.
 
 		GoSignalsVersion: goVersion,
 		SpecVersion:      constants.SSF_VERSION,
@@ -841,18 +1138,31 @@ func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.Response
 func WellKnownSsfConfigurationIssuerGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	rawIssuer := vars["issuer"]
-	issuer, _ := url.QueryUnescape(rawIssuer)
-	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuer))
+	issuerPath, _ := url.QueryUnescape(rawIssuer)
+	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuerPath))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	// TODO: Check that issuer is valid (ie. that there is a key that matches)
+	// Resolve the captured path to the registered signing-key name it addresses,
+	// using the same local-rooted-then-bare lookup the JWKS handler uses (GH
+	// #209): a base-rooted local issuer (ADR 0023) resolves to baseURL + "/" +
+	// <path>, a foreign/legacy issuer to its bare registered name. Per SSF §7.2.4
+	// the resolved name is echoed verbatim as `issuer` (it MUST equal the `iss` of
+	// SETs that issuer signs). Unknown issuers return 404 rather than synthesizing
+	// metadata. Discovery and JWKS share resolveIssuerKeyName so any segment that
+	// serves a key at /jwks/<path> also discovers here.
+	resolvedIss, exists := resolveIssuerKeyName(sa, issuerPath)
+	if !exists {
+		serverLog.Debug(fmt.Sprintf("Unknown issuer for discovery: %s", issuerPath))
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
 	baseUrl := sa.GetBaseUrl()
-	jwksUri, _ := baseUrl.Parse("/jwks/" + issuer)
+	jwksUri, _ := baseUrl.Parse("/jwks/" + issuerPath)
 	config := getTransmitterConfig(sa)
 	config.JwksUri = jwksUri.String()
-	config.Issuer = issuer
+	config.Issuer = resolvedIss
 
 	resp, _ := json.Marshal(config)
 	w.WriteHeader(http.StatusOK)

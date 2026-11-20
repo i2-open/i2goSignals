@@ -46,13 +46,54 @@ unattended deployment that must bootstrap itself without a human:
 - A `key`-scoped caller may `POST /key/<issuer>` to mint a **new** issuer signing
   key, but a key **takeover** (`force=replace`, `force=rotate`, or `?rotate`) is
   rejected for a key-scope-only caller — preventing key substitution / event
-  forgery.
+  forgery. Both rules hold for every `?alg=`: a `key`-scoped caller may create an
+  `RS256`, `ES256` or `ML-DSA-65` key, and may not rotate or replace one.
+- `POST /key/<issuer>` acts on **one signature algorithm**, named by `?alg=`
+  (`RS256` when absent, `ES256`, `ML-DSA-65`; anything else is a 400). A create
+  adds a key of that algorithm alongside the issuer's keys of other algorithms,
+  and is a 409 only when a key of that algorithm that is not revoked exists.
+  `force=rotate` adds a new key of that algorithm and leaves the previous one
+  active; `force=replace` deletes only that algorithm's keys before creating the
+  new one, so a plain `force=replace` replaces the RS256 keys and leaves ES256
+  and ML-DSA-65 keys in place. A key load (`POST /key/<issuer>` with a body)
+  uploads an RSA key, so its conflict check and `force=replace` apply to RS256
+  keys only. A stream never creates a signing key: create the key for the
+  stream's `iss` and `signing_alg` first.
 - A `key`-scoped caller may `GET /iat` to obtain an IAT, but the minted IAT is
   always **`reg`-only**: the `key`/admin capability does not propagate into it.
 
 This is the machine tier ladder: a bootstrap identity (`key`) seeds an issuer key
 and a `reg` IAT; the `reg` IAT registers a client that caps at `stream`+`event`;
 `admin` clients are provisioned out of band, not through the registration door.
+
+### Stranding signing transmitters: `confirm`
+
+A key change that an admin/root caller is allowed to make can still leave
+signing transmitters with nothing to sign with. A **suspend**
+(`POST /key/<issuer>/status` with `"status": "suspended"`, with or without a
+`kid`) or a **replace** (`POST /key/<issuer>?force=replace`, as a create or as a
+key load) is checked against the issuer's keys as they would be after the
+change. When a signing transmitter (any push, poll or SSTP pair transmitter not
+in Forward mode) whose `iss` is the issuer and whose status is not `disabled`
+would lose the only active key for its `signing_alg` (RS256 when empty), the
+request is refused with **409 Conflict** and nothing changes. The body is JSON:
+
+```json
+{"error": "suspending key https://issuer.example would leave no active signing key for RS256, ...",
+ "streams": [{"stream_id": "...", "description": "...", "signing_alg": "RS256"}]}
+```
+
+Resending the same request with `?confirm=true` (e.g.
+`?force=replace&confirm=true`) makes the change; any other `confirm` value counts
+as absent. The streams then pause and disable at runtime until a key is
+configured. An algorithm that has no active key before the change is not
+counted: the stream checks already report those streams.
+
+A **revoke**, a reactivate (`"status": "active"`), a rotate (`force=rotate` or
+`?rotate`) and a create that deletes nothing are never refused. A revoke is the
+response to a leaked key and never waits on a confirmation; the normal way to
+retire a key is to rotate first, so the old key's streams are covered before it
+is suspended or revoked.
 
 ### Foreign-server provisioning (endpoint → scope)
 
@@ -68,6 +109,67 @@ operation and requires `admin` (`root` rides free). See ADR 0009.
 The `/server` endpoints stay distinct from `/stream` (they are not folded into
 stream creation) so a foreign transmitter's credential keeps an independent
 lifecycle, which goSignalsAdmin's console depends on.
+
+### SSTP pair authorization
+
+An SSTP pair is one bidirectional relationship with two internal stream IDs per
+node — `txSid` (outbound) and `rxSid` (inbound). Its authorization model differs
+from a single-direction push/poll stream in three ways (PRD #154 Q9.1, Q19, Q38,
+Q42):
+
+- **One multi-SID pair bearer.** At pair create the existing register-tokens path
+  mints a **single** management bearer whose `EventAuthToken.StreamIds` carries
+  **both** SIDs (`[txSid, rxSid]`), via `IssueSstpPairToken`. `scope=event` is
+  sufficient for data-plane delivery and for status-read / verify; `scope=stream`
+  is required for `UpdateStatus` and config writes.
+- **Never a bare `authCtx.Eat` check.** Scope/stream checks always go through
+  `HasScope` / `IsAuthorizedForStream`, never a direct `authCtx.Eat` read — the
+  `Eat` is `nil` for OAuth/STS callers, so a bare check would silently deny them.
+  For a locally issued pair bearer the EAT enforces `StreamIds` containment; for
+  an OAuth/STS caller authority is the granted scope set.
+- **`FindByPairId` defense-in-depth at `POST /sstp/{id}`.** The `{id}` on the
+  path is the pair's `PairId` (the on-wire SSF `stream_id`), but the bearer is
+  bound to the **internal** SIDs, not the PairId. The handler resolves the record
+  via `FindByPairId` / `GetStreamStateByPairId` and authorizes the bearer against
+  the record's **actual** `txSid`/`rxSid` for `scope=event`. A token minted for a
+  different pair therefore cannot act on this one even if it reaches the right
+  path.
+
+**OAuth supersedes the static pair-bearer (migration path).** When the peer's
+stored `Server` alias carries an OAuth Client Config, that OAuth credential is
+intended to **supersede** the static per-pair bearer on the outbound (client)
+side — giving operators a migration path off static bearers without an
+SSTP-specific code change. The *enforcement* stance — actively rejecting a static
+bearer once OAuth is configured — is deferred to the bearer-rotation work in
+GH #152 (Q38); today the static `SstpMethod.AuthorizationHeader` is used when
+present.
+
+### Which stream a request acts on
+
+**Governing rule: a stream-bound token operates only on its bound streams.** A
+local token with non-empty `StreamIds` may act only on those streams, however
+the stream is named (#303):
+
+- **Parameter or path var:** `ValidateAuthorizationAny` refuses (`403`) a
+    `stream_id` query parameter or path var outside the binding.
+- **Body `stream_id`:** subject add/remove, subject-filter review, verify and
+    `PUT`/`PATCH /stream` refuse (`403`) a body stream outside the binding, or
+    other than the stream the request resolved to, so a bound token cannot
+    resolve one stream and act on another. A pair bearer may name either SID.
+- **Unbound callers** (a broad-scope token with empty `StreamIds`, the `any`
+    wildcard, OAuth/STS, bootstrap) are not confined by a binding and keep each
+    handler's own rule.
+
+`AuthContext.StreamId` is the stream the request names: the `stream_id` query
+parameter, then the path var. **For backwards compatibility**, when the request
+names none, a local token binding exactly one stream supplies it, so a stream
+requestor can, for example, check a transmitter's status without repeating its
+SID. The fallback yields only the token's own stream, so it never widens
+authorization; a pair bearer (two SIDs), the `any` wildcard and unbound callers
+get no fallback. With no parameter, a single-stream token now resolves where it
+used to get `403` at `GET`/`POST /status`, `GET /stream` (including
+rotate-on-GET) and `DELETE /stream`, and `400` at admin `GET /state`. Poll
+(`/poll/{id}`) and push (`/events/{id}`) always name the stream on the path.
 
 ### The bootstrap secret
 
@@ -127,7 +229,7 @@ add server gosignals1 https://goSignals1:8888
 add server gosignals2 https://goSignals2:8889
 create iat gosignals1 --output=/scim/iat-gosignals1.jwt
 create bundle --output=/scim/spire-bundle.pem
-create key gosignals1 cluster.scim.example.com --file=/scim/cluster-scim-issuer.pem
+create key gosignals1 cluster.scim.example.com --alg=RS256 --file=/scim/cluster-scim-issuer.pem
 exit
 ```
 
@@ -375,6 +477,40 @@ remains intentional and unchanged for goSignals' **own** locally issued tokens
 The environment variables are catalogued in
 [configuration_properties.md](configuration_properties.md#auth); the decision
 record is [ADR 0012](adr/0012-scope-checks-via-hasscope-not-eat.md).
+
+## SET signature verification (algorithm allow-list)
+
+`goSet.Parse` is the only verify-and-accept path for inbound SETs (`goSet.Peek`
+is the explicitly unverified counterpart — see ADR-0066 §D3). Parse restricts
+the accepted `alg` to `goSet.AllowedAlgs()`, currently `RS256`, `ES256` and `ML-DSA-65`,
+via `jwt.WithValidMethods`.
+
+The property is the same one §2 above buys for bearer tokens, and for the same
+reason: the allow-list is checked *before* the JWKS is consulted, so a SET
+carrying `alg: none`, or one HMAC-signed with the issuer's public RSA modulus,
+is refused without any key handling at all. `AllowedAlgs` is the single place a
+new SET signature algorithm becomes acceptable.
+
+`Peek` is deliberately unaffected. Push receivers read `iss`/`aud` from an
+unverified token so a wrong-issuer SET returns `invalid_issuer` rather than a
+generic error from a JWKS miss; its result is never an accepted token.
+
+## Transport security floor
+
+Every `tls.Config` the project builds states `MinVersion: tls.VersionTLS12`
+explicitly. Left unset, `crypto/tls` permits TLS 1.0 on the server side, and the
+omission is invisible at the call site — so a source-scan guard test in
+`pkg/tlsSupport` fails the build when a new `tls.Config` literal omits it.
+
+Key exchange is post-quantum by default. Go has negotiated the X25519MLKEM768
+hybrid since 1.24, and goSignals gets it by *not* constraining
+`CurvePreferences` — an invariant held by omission, which is exactly the kind a
+well-meaning "let's pin the curve list" change breaks silently. `CurvePreferences`
+is therefore written in exactly one place, `tlsSupport.Harden`, which every TLS
+config in `pkg/tlsSupport` and `pkg/oauthClient` routes through; the guard test
+enforces both halves. `I2SIG_TLS_PQ_KEM=MLKEM1024` widens the offered set to
+include standalone ML-KEM-1024 (see
+[configuration_properties.md](configuration_properties.md#tls)).
 
 ## Admin UI Issues
 

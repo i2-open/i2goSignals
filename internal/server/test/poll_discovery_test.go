@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -51,6 +51,13 @@ func TestPollStatusDiscovery(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
 			return
 		}
+		// This transmitter serves only the legacy sse-configuration; every other
+		// path — including the spec ssf-configuration the client tries first — is
+		// absent. Return a real 404 (not Go's default 200-empty) so the client's
+		// ssf→sse fallback engages exactly as it must against a legacy-only
+		// transmitter: the fallback is gated on a primary 404, not on a decode
+		// error (GH #209).
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer ts_final.Close()
 
@@ -84,10 +91,11 @@ func TestPollStatusDiscovery(t *testing.T) {
 
 			wellKnownUrl := ts_final.URL + "/.well-known/sse-configuration"
 			streamConfig := model.StreamConfiguration{
-				Id:             "test-stream-" + tt.name,
-				TxWellKnownUrl: &wellKnownUrl,
-				Iss:            "transmitter.example.com",
-				IssuerJWKSUrl:  ts_final.URL + "/jwks",
+				Id:               "test-stream-" + tt.name,
+				TxWellKnownUrl:   &wellKnownUrl,
+				Iss:              "transmitter.example.com",
+				IssuerJWKSUrl:    ts_final.URL + "/jwks",
+				TxAllowPlaintext: true, // httptest peers are plaintext (#322)
 				Delivery: &model.OneOfStreamConfigurationDelivery{
 					PollReceiveMethod: &model.PollReceiveMethod{
 						Method:      model.ReceivePoll,
@@ -99,7 +107,7 @@ func TestPollStatusDiscovery(t *testing.T) {
 				},
 			}
 
-			createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+			createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 			assert.NoError(t, err)
 
 			streamState, err := instance.GetStreamState(createdConfig.Id)

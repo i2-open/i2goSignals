@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -40,7 +40,7 @@ func (suite *PollBehaviorSuite) SetupSuite() {
 		},
 	}
 
-	stream, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(suite.T(), err)
 	state, err := instance.GetStreamState(stream.Id)
 	assert.NoError(suite.T(), err)
@@ -182,7 +182,7 @@ func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 	set.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{
 		"reason": "test error",
 	})
-	jti := set.ID
+	jti := deliveredJti(suite.stream, set.ID) // the jti the receiver sees (#363)
 	err = suite.instance.app.EventRouter.HandleEvent(&set, "", suite.stream.Id)
 	assert.NoError(t, err)
 
@@ -381,9 +381,10 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 
 	// Create a polling receiver stream pointing to our mock transmitter
 	streamConfig := model.StreamConfiguration{
-		Id:            "transmitter-403",
-		Iss:           "transmitter-403.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		Id:               "transmitter-403",
+		Iss:              "transmitter-403.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -393,7 +394,7 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 		},
 	}
 
-	createdConfig, err := suite.instance.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
+	createdConfig, err := suite.instance.CreateStream(streamConfig, authSupport.ConvertProject(suite.instance.projectId))
 	assert.NoError(t, err)
 	state, _ := suite.instance.GetStreamState(createdConfig.Id)
 
@@ -415,12 +416,12 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	t := suite.T()
 
 	// Allow up to 3 forbidden attempts before disabling. With a short delay
-	// and backoff factor, the test should observe at least one paused state
+	// and backoff factor, the test should observe at least one retrying state
 	// before the stream is ultimately disabled.
 	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_DELAY", "0.05") // 50ms base
 	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "3")
 	t.Setenv("I2SIG_POLL_RETRY_BACKOFF_FACTOR", "1.0") // disable exponential growth for predictability
-	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "1.0")     // cap
+	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "1.0")      // cap
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/jwks" {
@@ -433,9 +434,10 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	defer ts.Close()
 
 	streamConfig := model.StreamConfiguration{
-		Id:            "transmitter-403-retry",
-		Iss:           "transmitter-403-retry.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		Id:               "transmitter-403-retry",
+		Iss:              "transmitter-403-retry.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -445,26 +447,27 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 		},
 	}
 
-	createdConfig, err := suite.instance.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
+	createdConfig, err := suite.instance.CreateStream(streamConfig, authSupport.ConvertProject(suite.instance.projectId))
 	assert.NoError(t, err)
 	state, _ := suite.instance.GetStreamState(createdConfig.Id)
 
 	ps := suite.instance.app.HandleReceiver(state)
 	assert.NotNil(t, ps)
 
-	// Within the first ~100ms we should see at least one retry (status paused
-	// with a retry-attempt message), well before the limit of 3 is reached.
-	sawPause := false
+	// Within the first ~100ms we should see at least one retry (status enabled
+	// with a retry-attempt message — a retrying receiver has not paused, #310),
+	// well before the limit of 3 is reached.
+	sawRetry := false
 	for i := 0; i < 20; i++ {
 		time.Sleep(25 * time.Millisecond)
 		updatedState, _ := suite.instance.GetStreamState(createdConfig.Id)
-		if updatedState != nil && updatedState.Status == model.StreamStatePause &&
+		if updatedState != nil && updatedState.Status == model.StreamStateEnabled &&
 			strings.Contains(updatedState.ErrorMsg, "forbidden response (403), retrying") {
-			sawPause = true
+			sawRetry = true
 			break
 		}
 	}
-	assert.True(t, sawPause, "expected to observe a paused state with a 403 retry message during retries")
+	assert.True(t, sawRetry, "expected to observe an enabled state with a 403 retry message during retries")
 
 	// Eventually the stream must end up DISABLED with the diagnostic message.
 	var finalState *model.StreamStateRecord
@@ -479,5 +482,5 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "Stream disabled after 3 forbidden (403)")
 	assert.Contains(t, finalState.ErrorMsg, "scope")
+	assert.False(t, finalState.TransmitterCaused, "a retry-limit disable is not transmitter-caused (#310)")
 }
-

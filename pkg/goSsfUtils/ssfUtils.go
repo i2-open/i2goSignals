@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 
@@ -66,6 +67,65 @@ func GetStreamConfig(ctx context.Context, oauthHttpClient *http.Client, server *
 		return nil, err
 	}
 	return GetResourceFromEndpoint[model.StreamConfiguration](ctx, oauthHttpClient, configEndpoint, streamId, "configuration retrieve")
+}
+
+// CreateSstpPair provisions an SSTP pair on the peer named by server: it POSTs
+// the SstpPairBootstrap body to the peer's configuration endpoint (POST /stream)
+// and decodes the returned bidirectional StreamStateRecord (PairId, SstpInbound,
+// SstpMethod). The server discriminates the body shape via
+// model.IsSstpBootstrapBody and dispatches to createSstpPairHandler
+// (api_stream_management.go:543-544 / :660) — no admin-local pair-create surface
+// is required (PRD #49 Seam 4, admin commitments 1–3).
+//
+// Per-direction status is retrieved by the caller via TWO GetStreamStatus calls
+// (txSid == rec.PairId, rxSid == rec.SstpInbound.Id) — the per-pair bearer
+// covers both SIDs by construction (IssueSstpPairToken(pairId, inboundSid, …)).
+// The community deliberately DOES NOT add a "GetPairStatus" helper: two existing
+// pulls satisfy the surface without creating a parallel management path.
+//
+// Parameters follow the house convention of this file: ctx first,
+// oauthHttpClient second (carries the OAuth/pair bearer), server third,
+// bootstrap fourth. The returned record is a value pointer to a decoded
+// response, safe to consume without further server-side lookups.
+func CreateSstpPair(ctx context.Context, oauthHttpClient *http.Client, server *model.Server, bootstrap model.SstpPairBootstrap) (*model.StreamStateRecord, error) {
+	if oauthHttpClient == nil {
+		return nil, errors.New("CreateSstpPair: oauthHttpClient is nil")
+	}
+	configEndpoint, err := GetStreamConfigEndpoint(ctx, oauthHttpClient, server)
+	if err != nil {
+		return nil, fmt.Errorf("CreateSstpPair: resolve configuration endpoint: %w", err)
+	}
+
+	body, err := json.Marshal(bootstrap)
+	if err != nil {
+		return nil, fmt.Errorf("CreateSstpPair: marshal bootstrap: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, configEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("CreateSstpPair: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := oauthHttpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("CreateSstpPair: request failed: %w", err)
+	}
+	defer httpSupport.HandleRespClose(resp)
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		// Body may carry a server-side error description; surface it verbatim
+		// so the caller sees what the peer said.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("CreateSstpPair: peer returned status %d: %s", resp.StatusCode, string(snippet))
+	}
+
+	var record model.StreamStateRecord
+	if err := json.NewDecoder(resp.Body).Decode(&record); err != nil {
+		return nil, fmt.Errorf("CreateSstpPair: decode response: %w", err)
+	}
+	return &record, nil
 }
 
 func AddStreamIdToUrl(endpoint string, streamId string) string {

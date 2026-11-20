@@ -2,13 +2,16 @@ package delivery
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptrace"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -21,17 +24,33 @@ import (
 // streamService may be nil — in that case the peer-address capture is
 // reported in the outcome but not persisted (tests). keyReloader may be nil —
 // in that case the jws_signature_failed retry is skipped.
+//
+// Deliver is called concurrently for one stream (the router's push worker pool
+// shares one *StreamStateRecord), so the compare-and-persist of RemoteAddress
+// runs under a per-stream mutex (issue #346). The lock lives in the adapter,
+// not the router's batch loop, so it holds however deliveries are scheduled.
 type HTTPAdapter struct {
-	streamService *services.StreamService
-	keyReloader   KeyReloader
+	addressStore remoteAddressStore
+	keyReloader  KeyReloader
+
+	// addrLocks maps stream id -> *sync.Mutex guarding that stream's
+	// RemoteAddress read, persist and in-memory write.
+	addrLocks sync.Map
+}
+
+// remoteAddressStore is the one StreamService method the adapter needs;
+// *services.StreamService satisfies it.
+type remoteAddressStore interface {
+	UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP)
 }
 
 // NewHTTPAdapter wires the adapter for production.
 func NewHTTPAdapter(streamService *services.StreamService, keyReloader KeyReloader) *HTTPAdapter {
-	return &HTTPAdapter{
-		streamService: streamService,
-		keyReloader:   keyReloader,
+	a := &HTTPAdapter{keyReloader: keyReloader}
+	if streamService != nil {
+		a.addressStore = streamService
 	}
+	return a
 }
 
 // SetKeyReloader supplies the KeyReloader after construction. Used by the
@@ -42,14 +61,19 @@ func (a *HTTPAdapter) SetKeyReloader(r KeyReloader) {
 	a.keyReloader = r
 }
 
-// Deliver signs-or-forwards the SET and pushes it. See package docs for scope.
+// Deliver signs-or-forwards the SET and pushes it. See package docs for scope. A SET
+// that cannot be signed is not sent: the outcome carries SignErr.
 func (a *HTTPAdapter) Deliver(ctx context.Context, req PushRequest) PushOutcome {
 	out := a.attempt(ctx, req)
+	if out.SignErr != nil {
+		return out
+	}
 
 	if a.shouldRotateAndRetry(req, out.Classification) {
 		newKey, newKid := a.keyReloader.InvalidateAndReload(
 			req.Stream.StreamConfiguration.Id,
 			req.Stream.StreamConfiguration.Iss,
+			req.Stream.StreamConfiguration.SigningAlg,
 		)
 		if newKey != nil {
 			retryReq := req
@@ -85,7 +109,10 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	cfg := req.Stream.StreamConfiguration
 	pushCfg := cfg.Delivery.PushTransmitMethod
 
-	tokenString := a.tokenString(req)
+	tokenString, signed, err := a.tokenString(req)
+	if err != nil {
+		return PushOutcome{SignErr: err, Key: req.Key, Kid: req.Kid}
+	}
 
 	var capturedAddr string
 	trace := &httptrace.ClientTrace{
@@ -96,8 +123,12 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	traceCtx := httptrace.WithClientTrace(ctx, trace)
 
 	result := goSetPush.PushSET(traceCtx, tokenString, goSetPush.TransmitterConfig{
-		EndpointURL:   pushCfg.EndpointUrl,
-		Authorization: pushCfg.AuthorizationHeader,
+		EndpointURL:        pushCfg.EndpointUrl,
+		Authorization:      pushCfg.AuthorizationHeader,
+		InsecureSkipVerify: cfg.TxTLSSkipVerify,
+		// Business-stream TLS floor (#322): http:// receivers are refused inside
+		// PushSET unless the stream carries the tx_allow_plaintext opt-out.
+		AllowPlaintext: cfg.TxAllowPlaintext,
 	})
 
 	cls := goSetPush.ClassifyResult(result)
@@ -106,26 +137,42 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	return PushOutcome{
 		Classification: cls,
 		RemoteAddress:  capturedAddr,
+		Signed:         signed,
+		JWS:            tokenString,
 	}
 }
 
-func (a *HTTPAdapter) tokenString(req PushRequest) string {
+// tokenString is the SET to push: the original token as is in Forward mode, the
+// event re-signed under the stream's iss and signing_alg otherwise (an empty route
+// mode re-signs). A re-sign that fails returns the error, never an empty token.
+func (a *HTTPAdapter) tokenString(req PushRequest) (string, *goSet.SecurityEventToken, error) {
 	cfg := req.Stream.StreamConfiguration
 	if cfg.RouteMode == model.RouteModeForward {
-		return req.Event.Original
+		return req.Event.Original, nil, nil
 	}
-	token := &req.Event.Event
+	// PB/IM re-sign: copy the stored event token before mutating iss/aud/iat/kid so
+	// concurrent multi-stream fan-out cannot race on or corrupt the shared in-memory
+	// event (PRD #196 #200). The copy is a value copy of the SecurityEventToken: every
+	// field touched below is reassigned (slice/pointer headers replaced, not mutated
+	// through shared backing storage), so the source event's iss/aud/iat/kid stay
+	// pristine. txn (TransactionId) is carried over verbatim. jti (RegisteredClaims.ID)
+	// is set to the request's AckJti: a re-signed SET is a new SET with its own
+	// derived jti (#363), and the inbound jti stays on the stored copy's originalJti.
+	token := req.Event.Event
 	token.Issuer = cfg.Iss
 	token.Audience = cfg.Aud
 	token.IssuedAt = jwt.NewNumericDate(time.Now())
 	token.Kid = req.Kid
-	signed, err := token.JWS(jwt.SigningMethodRS256, req.Key)
-	if err != nil {
-		// Match the prior router behavior: log and return an empty token string so
-		// the receiver responds with an error that ClassifyResult will surface.
-		return ""
+	// The copy carries the stream's acknowledgement JTI (#363): the receiver
+	// acks it, and the store matches it against the delivery's ackJti.
+	if req.AckJti != "" {
+		token.ID = req.AckJti
 	}
-	return signed
+	signed, err := token.JWS(services.StreamSigningMethod(cfg.SigningAlg, req.Key), req.Key)
+	if err != nil {
+		return "", nil, fmt.Errorf("signing SET for issuer %s: %w", cfg.Iss, err)
+	}
+	return signed, &token, nil
 }
 
 // persistRemoteAddress updates the stream's RemoteAddress field both in memory
@@ -133,8 +180,12 @@ func (a *HTTPAdapter) tokenString(req PushRequest) string {
 // recorded. Mirrors the existing only-when-changed guard that previously lived
 // in router.pushEvent. Honors the caller's ctx so the write fails fast on
 // router shutdown rather than racing against a closing storage.
+//
+// Concurrent deliveries on one stream share the record, so the read, persist
+// and write run under the stream's mutex: each change is persisted once, and
+// the in-memory and stored values converge on the last address observed.
 func (a *HTTPAdapter) persistRemoteAddress(ctx context.Context, stream *model.StreamStateRecord, endpointURL, captured string) {
-	if captured == "" || a.streamService == nil {
+	if captured == "" || a.addressStore == nil {
 		return
 	}
 	endpoint, _ := url.Parse(endpointURL)
@@ -143,9 +194,23 @@ func (a *HTTPAdapter) persistRemoteAddress(ctx context.Context, stream *model.St
 		scheme = endpoint.Scheme
 	}
 	remoteIP := model.BuildOutboundRemoteIP(scheme, captured)
+
+	sid := stream.StreamConfiguration.Id
+	lock := a.addressLock(sid)
+	lock.Lock()
+	defer lock.Unlock()
 	if remoteIP.Equals(stream.RemoteAddress) {
 		return
 	}
-	a.streamService.UpdateRemoteAddress(ctx, stream.StreamConfiguration.Id, remoteIP)
+	a.addressStore.UpdateRemoteAddress(ctx, sid, remoteIP)
 	stream.RemoteAddress = remoteIP
+}
+
+// addressLock returns the mutex guarding RemoteAddress for stream sid.
+func (a *HTTPAdapter) addressLock(sid string) *sync.Mutex {
+	if m, ok := a.addrLocks.Load(sid); ok {
+		return m.(*sync.Mutex)
+	}
+	m, _ := a.addrLocks.LoadOrStore(sid, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }

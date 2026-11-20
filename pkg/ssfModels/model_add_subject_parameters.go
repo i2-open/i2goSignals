@@ -11,5 +11,5 @@ package model
 type AddSubjectParameters struct {
 	Subject *AllOfAddSubjectParametersSubject `json:"subject"`
 	// OPTIONAL. A boolean value; when true, it indicates that the Event Receiver has verified the Subject claim. When false, it indicates that the Event Receiver has not verified the Subject claim. If omitted, Event Transmitters SHOULD assume that the subject has been verified.
-	Verified bool `json:"verified,omitempty"`
+	Verified bool `json:"verified,omitzero"`
 }

@@ -1,0 +1,317 @@
+name: i2gosignals-bench
+# Performance-benchmark stack for i2gosignals.
+#
+# Derived from docker-compose.yml (the demonstration cluster) and trimmed to
+# the services the end-to-end harness (cmd/goSignalsBench, `make dev-bench`)
+# actually exercises: two goSignals nodes and the three-member MongoDB replica
+# set. Everything that only adds host load or per-request work has been taken
+# out or turned down so a run measures goSignals, not the harness around it:
+#
+#   - Production image (distroless, `make build-docker`), not Dockerfile-dev:
+#     no Delve, no `dlv debug` compile at start, no bind-mounted source tree,
+#     no optimisation-hostile debug build. `make bench-stack-up` rebuilds it.
+#   - LOG_LEVEL=WARN (BENCH_LOG_LEVEL overrides). At INFO the router writes a
+#     log line per SET; at DEBUG several. Text format, no JSON encoder.
+#   - No Keycloak, Postgres, SCIM servers, goSsfServer, Prometheus, Grafana,
+#     Loki or Alloy. The bench mints its own keys through the bootstrap token,
+#     so I2SIG_AUTH_OAUTH_SERVERS is blanked and no OIDC discovery runs.
+#   - pprof listeners stay on (idle cost is nil) so `--pprof` profiles work.
+#     Mutex/block sampling is off unless exported, because it is not free.
+#   - MongoDB: fixed 1 GiB WiredTiger cache per member, FTDC diagnostics off,
+#     small oplog, fresh named volumes per stack. Journaling stays on: the
+#     majority write concern the server relies on is meaningless without it.
+#   - goSignals1 runs the node-local WAL (I2SIG_STORE_WAL=local, ring-fed) on a
+#     named volume; goSignals2 stays at majority. BENCH_GS1_WAL / BENCH_GS2_WAL
+#     flip either. The harness picks the ingress contract per run with
+#     --durability=local|majority, so one stack serves both comparisons.
+#   - Optional second member of goSignals1's cluster, goSignals1b (compose
+#     profile `cluster`, host port 8887). Same env file, same WAL setting, its
+#     own WAL volume. `make bench-stack-up BENCH_CLUSTER=1` starts it and
+#     `make dev-bench ... BENCH_E2E_ARGS="--gs1b=https://localhost:8887"`
+#     splits the ingest workers across both members.
+#
+# Usage:
+#   make dev-down                       # ports 8888/8889/30001-3 are shared
+#   make bench-stack-up                 # build image + up --wait
+#   make dev-bench BENCH_E2E_CONCURRENCY=64 \
+#        BENCH_E2E_ARGS="--durability=local --mongo-uri='$(BENCH_MONGO_URI)' \
+#                        --history docs/perf/e2e-history.md --label bench-stack"
+#   make bench-stack-down               # add -v by hand to drop the volumes
+#
+# The stack is still one laptop. Every container shares the host CPUs with the
+# harness, the three mongod processes and anything else Docker is running;
+# stop unrelated stacks before a run and record GOMAXPROCS / concurrency with
+# every number (docs/perf/e2e-benchmark.md).
+
+volumes:
+    mongo1_data: {}
+    mongo2_data: {}
+    mongo3_data: {}
+    mongo_config: {}
+    # /app/resources holds the Mongo resume token and, on goSignals1, the WAL
+    # (wal/ingest-*.seg). A named volume keeps the WAL on the Docker VM's disk with
+    # real fsync semantics; a tmpfs here would make fsync a no-op and inflate
+    # the local-durability numbers.
+    gosignals1_resources: {}
+    gosignals1b_resources: {}
+    gosignals2_resources: {}
+
+# Anchors shared by the goSignals nodes. `environment` wins over `env_file`,
+# so the entries below override whatever config/goSignals*.env says.
+x-gosignals-env: &gosignals-env
+    LOG_LEVEL: ${BENCH_LOG_LEVEL:-WARN}
+    LOG_FORMAT: text
+    I2SIG_CLUSTER_NAME: bench
+    # Intra-cluster wake-up calls (one node telling the stream's delivery
+    # owner that new SETs arrived) are authenticated with this shared secret
+    # and sent to the plain-HTTP internal listener on this port. Without
+    # both, a SET ingested on the non-owning node waits for the owner's
+    # periodic backfill instead of being delivered at once.
+    I2SIG_CLUSTER_INTERNAL_TOKEN: ${BENCH_CLUSTER_TOKEN:-bench-cluster-secret}
+    I2SIG_CLUSTER_INTERNAL_PORT: "8898"
+    # Subject filtering evaluates per delivered SET. ENABLED matches the dev
+    # stack the history rows were taken on; set DISABLED to measure its cost.
+    I2SIG_SUBJECT_FILTERING: ${BENCH_SUBJECT_FILTERING:-ENABLED}
+    # No Keycloak in this stack: blank the OIDC discovery list so the key
+    # service never dials it. The harness authenticates with the bootstrap
+    # token and the client it registers.
+    I2SIG_AUTH_OAUTH_SERVERS: ""
+    KEYCLOAK_URL: ""
+    I2SIG_BOOTSTRAP_TOKEN: ${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
+    I2SIG_CLI_CLIENT_ID: gosignals-cli
+    # Go pprof listener (plain HTTP, unauthenticated). Host ports: 6060 / 6061.
+    I2SIG_PPROF_ADDR: ${BENCH_PPROF_ADDR:-:6060}
+    I2SIG_PPROF_MUTEX_FRACTION: ${I2SIG_PPROF_MUTEX_FRACTION:-}
+    I2SIG_PPROF_BLOCK_RATE: ${I2SIG_PPROF_BLOCK_RATE:-}
+    # Runtime knobs, all pass-through and empty by default. GOMAXPROCS bounds
+    # the P count (and the derived push/sign concurrency); GOGC=200 or a
+    # GOMEMLIMIT trades memory for fewer GC cycles on an allocation-heavy path.
+    I2SIG_PUSH_CONCURRENCY: ${I2SIG_PUSH_CONCURRENCY:-}
+    I2SIG_DELIVERY_INFLIGHT_MAX: ${I2SIG_DELIVERY_INFLIGHT_MAX:-}
+    GOMAXPROCS: ${GOMAXPROCS:-}
+    GOGC: ${GOGC:-}
+    GOMEMLIMIT: ${GOMEMLIMIT:-}
+    # Ring-fed delivery is required whenever a node runs I2SIG_STORE_WAL=local
+    # in a cluster; harmless (ignored) at majority.
+    I2SIG_STORE_WAL_RING_FED: "true"
+    I2SIG_STORE_WAL_DIR: /app/resources/wal
+    # Must stay below stop_grace_period so a stop drains instead of being killed.
+    I2SIG_STORE_WAL_DRAIN_TIMEOUT: 20s
+
+x-mongo-common: &mongo-common
+    image: mongo:8.0.13
+    environment:
+        - MONGO_INITDB_ROOT_USERNAME=root
+        - MONGO_INITDB_ROOT_PASSWORD=dockTest
+        - MONGO_REPLICA_SET_NAME=dbrs
+    networks:
+        - backend
+    ulimits:
+        nofile:
+            soft: 65536
+            hard: 65536
+
+services:
+    # mongod flags beyond the demo stack:
+    #   --wiredTigerCacheSizeGB 1  three members on one VM otherwise each size
+    #                              their cache at 50% of the VM's memory
+    #   --oplogSize 512            MB; the bench churns a few thousand SETs
+    #   diagnosticDataCollectionEnabled=false  no FTDC sampling/writes
+    # Journaling is left at the default (on); the server acknowledges at
+    # w:majority j:true and the bench snapshots the journal counters.
+    mongo1:
+        <<: *mongo-common
+        container_name: bench-mongo1
+        ports:
+            - "30001:30001"
+        command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30001 --wiredTigerCacheSizeGB 1 --oplogSize 512 --setParameter diagnosticDataCollectionEnabled=false"]
+        volumes:
+            - mongo1_data:/data/db
+            - mongo_config:/data/config
+        healthcheck:
+            test: ["CMD", "mongosh", "--port", "30001", "--eval", "db.adminCommand('ping')"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+    mongo2:
+        <<: *mongo-common
+        container_name: bench-mongo2
+        ports:
+            - "30002:30002"
+        command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30002 --wiredTigerCacheSizeGB 1 --oplogSize 512 --setParameter diagnosticDataCollectionEnabled=false"]
+        volumes:
+            - mongo2_data:/data/db
+            - mongo_config:/data/config
+        healthcheck:
+            test: ["CMD", "mongosh", "--port", "30002", "--eval", "db.adminCommand('ping')"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+    mongo3:
+        <<: *mongo-common
+        container_name: bench-mongo3
+        ports:
+            - "30003:30003"
+        command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30003 --wiredTigerCacheSizeGB 1 --oplogSize 512 --setParameter diagnosticDataCollectionEnabled=false"]
+        volumes:
+            - mongo3_data:/data/db
+            - mongo_config:/data/config
+        healthcheck:
+            test: ["CMD", "mongosh", "--port", "30003", "--eval", "db.adminCommand('ping')"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+    mongo-init:
+        image: mongo:8.0.13
+        container_name: bench-mongo-init
+        depends_on:
+            mongo1:
+                condition: service_started
+            mongo2:
+                condition: service_started
+            mongo3:
+                condition: service_started
+        volumes:
+            - "./config/mongo:/scripts"
+            - mongo_config:/data/config
+        restart: "no"
+        networks:
+            - backend
+        entrypoint:
+            - "bash"
+            - "-c"
+            - |
+                if [ ! -f /data/config/replica.key ]; then
+                  echo "Generating replica.key..."
+                  openssl rand -base64 756 > /data/config/replica.key
+                  chmod 400 /data/config/replica.key
+                  chown 999:999 /data/config/replica.key
+                fi
+                exec bash /scripts/mongo_init.sh
+
+    goSignals1:
+        image: ${BENCH_IMAGE:-i2gosignals:latest}
+        container_name: bench-gosignals1
+        hostname: goSignals1
+        networks:
+            - frontend
+            - backend
+        depends_on:
+            mongo1:
+                condition: service_healthy
+            mongo-init:
+                condition: service_completed_successfully
+        ports:
+            - "8888:8888"
+            - "6060:6060"   # pprof (I2SIG_PPROF_ADDR)
+        volumes:
+            - "./config/certs:/app/config/certs:ro"
+            - gosignals1_resources:/app/resources
+        env_file:
+            - ./config/goSignals1.env
+        environment:
+            <<: *gosignals-env
+            # Ingest contract ceiling for this node. `local` lets streams
+            # created with durability=local acknowledge after a WAL fsync;
+            # the bench's --durability flag chooses per run.
+            I2SIG_STORE_WAL: ${BENCH_GS1_WAL:-local}
+        ulimits:
+            nofile:
+                soft: 65536
+                hard: 65536
+        stop_grace_period: 30s
+        healthcheck:
+            test: ["CMD", "/app/healthcheck", "-k", "https://localhost:8888/health"]
+            interval: 5s
+            timeout: 5s
+            retries: 30
+
+    # Second member of goSignals1's cluster. Only started with
+    # `--profile cluster`; the single-node rows in e2e-history.md were taken
+    # without it. It has its own resources volume because a WAL directory is
+    # owned by one process (the node refuses to start on a shared one).
+    goSignals1b:
+        image: ${BENCH_IMAGE:-i2gosignals:latest}
+        container_name: bench-gosignals1b
+        hostname: goSignals1b
+        profiles:
+            - cluster
+        networks:
+            - frontend
+            - backend
+        depends_on:
+            mongo1:
+                condition: service_healthy
+            mongo-init:
+                condition: service_completed_successfully
+            goSignals1:
+                condition: service_healthy
+        ports:
+            - "8887:8888"
+            - "6062:6060"   # pprof (I2SIG_PPROF_ADDR)
+        volumes:
+            - "./config/certs:/app/config/certs:ro"
+            - gosignals1b_resources:/app/resources
+        env_file:
+            - ./config/goSignals1.env
+        environment:
+            <<: *gosignals-env
+            I2SIG_STORE_WAL: ${BENCH_GS1_WAL:-local}
+            # The env file's BASE_URL names goSignals1. A node advertises the
+            # host of its BASE_URL to its peers for wake-up calls, so the
+            # second node must name itself or its peers call the wrong node.
+            BASE_URL: https://goSignals1b:8888/
+        ulimits:
+            nofile:
+                soft: 65536
+                hard: 65536
+        stop_grace_period: 30s
+        healthcheck:
+            test: ["CMD", "/app/healthcheck", "-k", "https://localhost:8888/health"]
+            interval: 5s
+            timeout: 5s
+            retries: 30
+
+    goSignals2:
+        image: ${BENCH_IMAGE:-i2gosignals:latest}
+        container_name: bench-gosignals2
+        hostname: goSignals2
+        networks:
+            - frontend
+            - backend
+        depends_on:
+            mongo1:
+                condition: service_healthy
+            mongo-init:
+                condition: service_completed_successfully
+        ports:
+            - "8889:8889"
+            - "6061:6060"   # pprof (I2SIG_PPROF_ADDR)
+        volumes:
+            - "./config/certs:/app/config/certs:ro"
+            - gosignals2_resources:/app/resources
+        env_file:
+            - ./config/goSignals2.env
+        environment:
+            <<: *gosignals-env
+            # Receiver node: majority by default so the two nodes differ only
+            # in the ingest contract under test.
+            I2SIG_STORE_WAL: ${BENCH_GS2_WAL:-majority}
+        ulimits:
+            nofile:
+                soft: 65536
+                hard: 65536
+        stop_grace_period: 30s
+        healthcheck:
+            test: ["CMD", "/app/healthcheck", "-k", "https://localhost:8889/health"]
+            interval: 5s
+            timeout: 5s
+            retries: 30
+
+networks:
+    frontend:
+        driver: bridge
+        driver_opts:
+            com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+    backend:
+        driver: bridge

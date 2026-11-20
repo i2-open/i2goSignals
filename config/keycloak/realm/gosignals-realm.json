@@ -337,6 +337,10 @@
       {
         "name": "goSignalsStreamRole",
         "description": "Stream scope for goSignals"
+      },
+      {
+        "name": "operator",
+        "description": "Operator access to goSignals Admin (ADR-0073 d7)"
       }
     ]
   },
@@ -358,7 +362,8 @@
       "realmRoles": [
         "admin",
         "goSignalsRootRole",
-        "goSignalsAdminRole"
+        "goSignalsAdminRole",
+        "operator"
       ],
       "clientRoles": {
         "grafana": [
@@ -382,7 +387,8 @@
       ],
       "realmRoles": [
         "user",
-        "goSignalsAdminRole"
+        "goSignalsAdminRole",
+        "operator"
       ],
       "clientRoles": {
         "grafana": [

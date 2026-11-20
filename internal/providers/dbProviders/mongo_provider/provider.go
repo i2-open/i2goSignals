@@ -3,19 +3,23 @@ package mongo_provider
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/dao/daometrics"
+	"github.com/i2-open/i2goSignals/internal/dao/groupcommit"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
-	"github.com/i2-open/i2goSignals/internal/services"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -29,8 +33,13 @@ const CDbName = "ssef"
 const CDbStreamCfg = "streams"
 const CDbKeys = "keys"
 const CDbEvents = "events"
-const CDbPending = "pendingEvents"
-const CDbDelivered = "deliveredEvents"
+
+// CDbDeliveries is the single delivery-reference collection (#359): one
+// document per (stream, inbound JTI) carrying its pending/delivered state and
+// the ackJti the receiver acknowledges with. It replaced pendingEvents and
+// deliveredEvents, which the router's startup MigrateLegacyDeliveries carries
+// across and drops (#361).
+const CDbDeliveries = "deliveries"
 const CDbClients = "clients"
 const CDbLeases = "cluster_leases"
 const CDbNodes = "cluster_nodes"
@@ -91,6 +100,23 @@ type MongoProvider struct {
 	tokenDAO         *mongodao.TokenDAOMongo
 	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
 
+	// meteredEventDAO is eventDAO wrapped by groupcommit (#330) and daometrics (#328):
+	// the instance the EventService writes through and GetEventDAO hands out.
+	// The raw eventDAO is kept for the SetCollections rebind path.
+	meteredEventDAO interfaces.EventDAO
+
+	// serverVersion is the MongoDB server version reported by buildInfo on the
+	// last successful connect ("" when it could not be read). It selects the
+	// ingest write path (ADR 0043). Accessed under m.mu.
+	serverVersion string
+
+	// indexesEnsured records whether createIndexes has run in THIS process.
+	// It runs on every start (not just for a brand-new database) so a release
+	// that adds an index reaches deployments that already have the collection,
+	// and is a no-op after the first connect. Accessed under m.mu (initialize()
+	// runs while the lock is held). Reset to false for a fresh database.
+	indexesEnsured bool
+
 	// tokenTTLEnsured records whether the token TTL index has been reconciled in
 	// THIS process. The desired expireAfterSeconds comes from I2SIG_TOKEN_RETENTION
 	// which is fixed for the process lifetime, so once reconciled, reconnects can
@@ -115,14 +141,13 @@ type MongoProvider struct {
 	ssefDb *mongo.Database
 
 	// Collections
-	streamCol    *mongo.Collection
-	keyCol       *mongo.Collection
-	eventCol     *mongo.Collection
-	pendingCol   *mongo.Collection
-	deliveredCol *mongo.Collection
-	clientCol    *mongo.Collection
-	leaseCol     *mongo.Collection
-	nodeCol      *mongo.Collection
+	streamCol        *mongo.Collection
+	keyCol           *mongo.Collection
+	eventCol         *mongo.Collection
+	deliveriesCol    *mongo.Collection
+	clientCol        *mongo.Collection
+	leaseCol         *mongo.Collection
+	nodeCol          *mongo.Collection
 	serverCol        *mongo.Collection
 	tokenCol         *mongo.Collection
 	subjectFilterCol *mongo.Collection
@@ -139,6 +164,30 @@ type MongoProvider struct {
 	// coordinator owns the cluster lease/node-registry methods. Collections
 	// are pushed in via SetCollections during initialize/reconnect.
 	coordinator *MongoCoordinator
+
+	// ctx is the server lifecycle context supplied at construction (seam S4).
+	// Cancelling it tells every Mongo round-trip this provider owns — connect,
+	// health check, and the coordinator's lease heartbeats — to give up now
+	// rather than run out its own deadline. Never nil; Open substitutes
+	// context.Background() for callers that have no lifecycle to offer.
+	ctx context.Context
+}
+
+// lifetimeCtx returns the provider's lifecycle context, never nil.
+func (m *MongoProvider) lifetimeCtx() context.Context {
+	if m.ctx == nil {
+		return context.Background()
+	}
+	return m.ctx
+}
+
+// teardownCtx is the lifecycle context with cancellation detached. Disconnect
+// runs *because* the lifecycle ended, so it must not inherit the cancellation
+// that triggered it — context.WithoutCancel keeps the context's values while
+// dropping the Done channel that would otherwise abort the disconnect
+// immediately.
+func (m *MongoProvider) teardownCtx() context.Context {
+	return context.WithoutCancel(m.lifetimeCtx())
 }
 
 func (m *MongoProvider) Name() string {
@@ -155,7 +204,7 @@ func (m *MongoProvider) initServices() {
 	defer m.mu.Unlock()
 
 	m.streamDAO = mongodao.NewStreamDAO(nil).(*mongodao.StreamDAOMongo)
-	m.eventDAO = mongodao.NewEventDAO(nil, nil, nil).(*mongodao.EventDAOMongo)
+	m.eventDAO = mongodao.NewEventDAO(nil, nil).(*mongodao.EventDAOMongo)
 	m.keyDAO = mongodao.NewKeyDAO(nil).(*mongodao.KeyDAOMongo)
 	m.clientDAO = mongodao.NewClientDAO(nil).(*mongodao.ClientDAOMongo)
 	m.serverDAO = mongodao.NewServerDAO(nil).(*mongodao.ServerDAOMongo)
@@ -164,9 +213,12 @@ func (m *MongoProvider) initServices() {
 
 	m.tokenService = services.NewTokenService(m.tokenDAO)
 	m.tokenService.SetStreamDAO(m.streamDAO)
-	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService)
-	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
-	m.eventService = services.NewEventService(m.eventDAO)
+	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService, oauthServersFromEnv)
+	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer, streamServiceConfigFromEnv())
+	// groupcommit coalesces concurrent writes (community #330) beneath the
+	// daometrics wrapper.
+	m.meteredEventDAO = daometrics.Wrap(groupcommit.Wrap(m.eventDAO, groupcommit.ConfigFromEnv()), daometrics.Default)
+	m.eventService = services.NewEventService(m.meteredEventDAO)
 	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
 	m.serverService = services.NewServerService(m.serverDAO)
 	m.subjectFilterService = services.NewSubjectFilterService(m.subjectFilterDAO)
@@ -188,7 +240,7 @@ func (m *MongoProvider) initServices() {
 	m.streamService.SetSubjectRelayService(m.subjectRelayService)
 
 	if m.coordinator == nil {
-		m.coordinator = NewMongoCoordinator()
+		m.coordinator = NewMongoCoordinator(m.lifetimeCtx())
 	}
 }
 
@@ -208,6 +260,14 @@ func (m *MongoProvider) GetSubjectRelayService() *services.SubjectRelayService {
 	return m.subjectRelayService
 }
 
+// GetEventDAO returns the live storage-backed EventDAO — the SAME instance
+// wired into the EventService (initServices). Rebinds on reconnect happen in
+// place via SetCollections, so the instance is stable for the process lifetime.
+// Exposed so dbProviders.Persistence can bind a RetentionEngine to the live
+// store (issue #229, ADR 0055 A5.2). It is the daometrics-instrumented wrapper
+// (community #328) over the groupcommit batcher (community #330).
+func (m *MongoProvider) GetEventDAO() interfaces.EventDAO { return m.meteredEventDAO }
+
 // GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in
 // internal/providers/dbProviders/mongo_provider/test/rebind_test.go to assert
 // that collection rebinding takes effect on the same DAO instance.
@@ -216,7 +276,74 @@ func (m *MongoProvider) GetKeyDAO() interfaces.KeyDAO { return m.keyDAO }
 // Coordinator returns the MongoCoordinator owning lease and node-registry
 // state. Always non-nil after Open / initServices.
 func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
-    return m.coordinator
+	return m.coordinator
+}
+
+// collectionWriteConcerns is the per-collection write concern table (#332).
+// Write concern lives on the collection handle, not the client, so the
+// durability cost is paid only where the contract requires it. Keep this
+// table in step with docs/configuration_properties.md ("Mongo write concern").
+//
+//	collection        concern            why
+//	events            majority, j:true   ADR 0038: stored before ack
+//	deliveries        majority, j:true   ADR 0038: stored before ack
+//	cluster_leases    majority, j:true   a w:1 lease grant can roll back on
+//	                                     failover, letting two nodes own one
+//	                                     stream; fencing needs majority
+//	cluster_nodes     w:1                heartbeat registry, rewritten each tick
+//	streams, keys, clients, servers,
+//	tokens, subject_filters
+//	                  w:1                non-contract admin/config state
+//
+// No transactions are used. The one-trip events+pending client bulkWrite
+// (ADR 0043) does not take a collection's concern: a client-level bulkWrite
+// uses the client's concern, and the client carries none, so that call sets
+// majority+journal itself (mongodao.EventStoreWriteConcern).
+// The ack (one conditional deliveries updateMany plus copy inserts, #359) sets
+// w:1 itself: a rolled-back state flip only re-delivers a SET the receiver
+// already dedups by JTI (ADR 0017).
+var collectionWriteConcerns = map[string]*writeconcern.WriteConcern{
+	CDbEvents:         mongodao.EventStoreWriteConcern(),
+	CDbDeliveries:     mongodao.EventStoreWriteConcern(),
+	CDbLeases:         mongodao.EventStoreWriteConcern(),
+	CDbNodes:          writeconcern.W1(),
+	CDbStreamCfg:      writeconcern.W1(),
+	CDbKeys:           writeconcern.W1(),
+	CDbClients:        writeconcern.W1(),
+	CDbServers:        writeconcern.W1(),
+	CDbTokens:         writeconcern.W1(),
+	CDbSubjectFilters: writeconcern.W1(),
+}
+
+// collection opens a handle on m.ssefDb with the write concern from
+// collectionWriteConcerns. An unlisted name falls back to majority+journal,
+// the safe default.
+func (m *MongoProvider) collection(name string) *mongo.Collection {
+	wc, ok := collectionWriteConcerns[name]
+	if !ok {
+		wc = mongodao.EventStoreWriteConcern()
+	}
+	return m.ssefDb.Collection(name, options.Collection().SetWriteConcern(wc))
+}
+
+// openCollections opens every collection handle on m.ssefDb.
+func (m *MongoProvider) openCollections() {
+	m.streamCol = m.collection(CDbStreamCfg)
+	m.keyCol = m.collection(CDbKeys)
+	m.deliveriesCol = m.collection(CDbDeliveries)
+	m.eventCol = m.collection(CDbEvents)
+	m.clientCol = m.collection(CDbClients)
+	m.serverCol = m.collection(CDbServers)
+	m.leaseCol = m.collection(CDbLeases)
+	m.nodeCol = m.collection(CDbNodes)
+	m.tokenCol = m.collection(CDbTokens)
+	m.subjectFilterCol = m.collection(CDbSubjectFilters)
+}
+
+// mongoClientOptions builds the client options. It deliberately sets no write
+// concern: each collection handle carries its own (collectionWriteConcerns).
+func mongoClientOptions(uri string) *options.ClientOptions {
+	return options.Client().ApplyURI(uri)
 }
 
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
@@ -242,34 +369,33 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		m.ssefDb = m.mongoClient.Database(m.DbName)
 	}
 
-	// Initialize collections
-	m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
-	m.keyCol = m.ssefDb.Collection(CDbKeys)
-	m.deliveredCol = m.ssefDb.Collection(CDbDelivered)
-	m.pendingCol = m.ssefDb.Collection(CDbPending)
-	m.eventCol = m.ssefDb.Collection(CDbEvents)
-	m.clientCol = m.ssefDb.Collection(CDbClients)
-	m.serverCol = m.ssefDb.Collection(CDbServers)
-	m.leaseCol = m.ssefDb.Collection(CDbLeases)
-	m.nodeCol = m.ssefDb.Collection(CDbNodes)
-	m.tokenCol = m.ssefDb.Collection(CDbTokens)
-	m.subjectFilterCol = m.ssefDb.Collection(CDbSubjectFilters)
+	m.openCollections()
 
 	if m.coordinator == nil {
-		m.coordinator = NewMongoCoordinator()
+		m.coordinator = NewMongoCoordinator(m.lifetimeCtx())
 	}
 	m.coordinator.SetCollections(m.leaseCol, m.nodeCol)
 
-	// Create indexes
 	if !dbExists {
-		err = m.createIndexes(ctx)
-		if err != nil {
+		// A fresh database (first connect, or after a ResetDb that dropped it)
+		// carries none of the indexes, even if a prior connect in this process
+		// already ensured them.
+		m.indexesEnsured = false
+		m.tokenTTLEnsured = false
+	}
+
+	// Create indexes. This used to run only for a brand-new database, which
+	// meant an index added by a later release was never built on an existing
+	// deployment: its collections already existed, so the branch was skipped
+	// and the new access path stayed unindexed for the life of the database.
+	// Index creation is idempotent for an already-present identical spec, so
+	// it is safe on every start; indexesEnsured keeps reconnects within one
+	// process from repeating the round trips.
+	if !m.indexesEnsured {
+		if err = m.createIndexes(ctx); err != nil {
 			return err
 		}
-		// A fresh database (first connect, or after a ResetDb that dropped it)
-		// has no TTL index; force the reconcile below to run even if a prior
-		// connect in this process had already ensured it.
-		m.tokenTTLEnsured = false
+		m.indexesEnsured = true
 	}
 
 	// Ensure the token TTL index. After the first successful reconcile in this
@@ -281,61 +407,152 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		return err
 	}
 
-    // Rebind the existing DAOs in place. The DAOs are created once by
-    // initServices with nil collections; here we point them at the
-    // collections from the freshly-(re)connected database. Services hold
-    // the same DAO instances so they immediately see the new collections.
-    m.streamDAO.SetCollection(m.streamCol)
-    m.eventDAO.SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
-    m.keyDAO.SetCollection(m.keyCol)
-    m.clientDAO.SetCollection(m.clientCol)
-    m.serverDAO.SetCollection(m.serverCol)
-    m.tokenDAO.SetCollection(m.tokenCol)
-    m.subjectFilterDAO.SetCollection(m.subjectFilterCol)
+	// Rebind the existing DAOs in place. The DAOs are created once by
+	// initServices with nil collections; here we point them at the
+	// collections from the freshly-(re)connected database. Services hold
+	// the same DAO instances so they immediately see the new collections.
+	m.streamDAO.SetCollection(m.streamCol)
+	m.eventDAO.SetCollections(m.eventCol, m.deliveriesCol)
+	m.keyDAO.SetCollection(m.keyCol)
+	m.clientDAO.SetCollection(m.clientCol)
+	m.serverDAO.SetCollection(m.serverCol)
+	m.tokenDAO.SetCollection(m.tokenCol)
+	m.subjectFilterDAO.SetCollection(m.subjectFilterCol)
 
-    // Initialize token keys against the existing keyService so a slow
-    // reconnect doesn't leave the AuthIssuer with a nil PublicKey.
-    err = m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
-    if err != nil {
-        return err
-    }
-
-    // Services are constructed once at startup (initServices). After a
-    // (re)connect we keep the same services and only rebind DAO
-    // collections (above). This is the swap-on-reconnect kill point.
-    m.dbInit = true
-
-    // Load receiver streams against the same StreamService instance we
-    // wired up at startup.
-    if m.streamService.LoadReceiverStreams(ctx) == nil {
-        pLog.Warn("No receiver streams loaded during initialization")
-    }
-
-    return nil
-}
-
-func (m *MongoProvider) createIndexes(ctx context.Context) error {
-	indexSid := mongo.IndexModel{
-		Keys: bson.M{"sid": 1},
-	}
-
-	_, err := m.pendingCol.Indexes().CreateOne(ctx, indexSid)
+	// Initialize token keys against the existing keyService so a slow
+	// reconnect doesn't leave the AuthIssuer with a nil PublicKey.
+	err = m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
 	if err != nil {
-		pLog.Error("Error creating index for pendingCol", "error", err)
 		return err
 	}
-	_, err = m.deliveredCol.Indexes().CreateOne(ctx, indexSid)
-	if err != nil {
-		pLog.Error("Error creating index for deliveredCol", "error", err)
+
+	// Services are constructed once at startup (initServices). After a
+	// (re)connect we keep the same services and only rebind DAO
+	// collections (above). This is the swap-on-reconnect kill point.
+	m.dbInit = true
+
+	// Load receiver streams against the same StreamService instance we
+	// wired up at startup.
+	if m.streamService.LoadReceiverStreams(ctx) == nil {
+		pLog.Warn("No receiver streams loaded during initialization")
+	}
+
+	return nil
+}
+
+// eventJtiIndexName is the fixed name for the sparse-unique JTI index on
+// eventCol. JTI is the persistence-layer dedup key (RFC 8417 §2.2). The
+// index is the authoritative race breaker for concurrent inserts; the DAO
+// translates the resulting duplicate-key error to interfaces.ErrDuplicateJTI
+// so the service/router can short-circuit. Sparse so historical or
+// operational records missing the field are not rejected.
+const eventJtiIndexName = "eventJtiUnique"
+
+// Index names on the deliveries collection (#359) and the events
+// originalJti (#359) and sortTime (#360) indexes. Named explicitly so they can
+// be asserted on. The deliveries names and models live with the adapter, which
+// also ensures them before MigrateLegacyDeliveries (#361).
+const (
+	deliveriesSidJtiIndexName           = mongodao.DeliveriesSidJtiIndexName
+	deliveriesSidAckJtiIndexName        = mongodao.DeliveriesSidAckJtiIndexName
+	deliveriesSidStateJtiIndexName      = mongodao.DeliveriesSidStateJtiIndexName
+	deliveriesExpireAtIndexName         = mongodao.DeliveriesExpireAtIndexName
+	deliveriesJtiIndexName              = mongodao.DeliveriesJtiIndexName
+	deliveriesPendingCreatedAtIndexName = mongodao.DeliveriesPendingCreatedAtIndexName
+	eventOriginalJtiIndexName           = "eventOriginalJti"
+	eventSortTimeIndexName              = "eventSortTime"
+)
+
+func (m *MongoProvider) createIndexes(ctx context.Context) error {
+	// CreateMany is idempotent for already-present identical specs, so this
+	// is additive on an existing deployment.
+	if _, err := m.deliveriesCol.Indexes().CreateMany(ctx, mongodao.DeliveriesIndexModels()); err != nil {
+		pLog.Error("Error creating indexes for deliveries", "error", err)
+		return err
+	}
+	// Sparse {originalJti} on events: Ack stores outbound re-signed copies
+	// carrying originalJti, and FindByTimeRange excludes them.
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "originalJti", Value: 1}},
+		Options: options.Index().SetName(eventOriginalJtiIndexName).SetSparse(true),
+	}); err != nil {
+		pLog.Error("Error creating originalJti index for eventCol", "error", err)
+		return err
+	}
+	// {sortTime} on events: the retention sweep reads bodies older than the
+	// body cutoff in ascending sortTime (#360).
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sortTime", Value: 1}},
+		Options: options.Index().SetName(eventSortTimeIndexName),
+	}); err != nil {
+		pLog.Error("Error creating sortTime index for eventCol", "error", err)
+		return err
+	}
+	// {receivedAt} partial on ping types: the ping purge's window read and
+	// oldest-ping lookup (ADR 0048).
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongodao.EventsPingReceivedAtIndexModel()); err != nil {
+		pLog.Error("Error creating ping receivedAt index for eventCol", "error", err)
 		return err
 	}
 
 	indexIss := mongo.IndexModel{
 		Keys: bson.M{"iss": 1},
 	}
-	_, err = m.keyCol.Indexes().CreateOne(ctx, indexIss)
+	_, err := m.keyCol.Indexes().CreateOne(ctx, indexIss)
 	if err != nil {
 		pLog.Error("Error creating index for keyCol", "error", err)
+		return err
+	}
+
+	// Sparse-unique index on eventCol.jti — the persistence-layer dedup
+	// contract for SET ingestion (PRD #153, slice #156). Startup safety net:
+	// if pre-existing duplicate JTIs are present in the collection, Mongo
+	// will refuse to build the index. Log at WARN with a remediation hint
+	// and continue startup; the dedup guarantee is OFF until an operator
+	// cleans up duplicates and restarts. This is a documented degradation:
+	// we do NOT silently swallow (we log it), and we do NOT abort startup.
+	eventJtiIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "jti", Value: 1}},
+		Options: options.Index().
+			SetName(eventJtiIndexName).
+			SetUnique(true).
+			SetSparse(true),
+	}
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, eventJtiIndex); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			pLog.Warn("Pre-existing duplicate JTIs prevent eventJtiUnique index; SET ingestion dedup guarantee is OFF. Remediate duplicates in eventCol and restart to re-enable.",
+				"index", eventJtiIndexName,
+				"error", err)
+		} else {
+			pLog.Error("Error creating index for eventCol", "error", err)
+			return err
+		}
+	}
+
+	// Sparse-unique indexes on the SSTP pair lookup keys (PRD #154, slice #159).
+	// Both fields are absent on non-SSTP records, so the sparse option means
+	// those records pay zero index cost. Uniqueness guards against two pairs
+	// colliding on the same inbound SID or PairId.
+	sstpInboundIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "sstp_inbound.id", Value: 1}},
+		Options: options.Index().
+			SetName("sstpInboundSidUnique").
+			SetUnique(true).
+			SetSparse(true),
+	}
+	if _, err := m.streamCol.Indexes().CreateOne(ctx, sstpInboundIndex); err != nil {
+		pLog.Error("Error creating sstp_inbound.id index for streamCol", "error", err)
+		return err
+	}
+	pairIdIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "pair_id", Value: 1}},
+		Options: options.Index().
+			SetName("sstpPairIdUnique").
+			SetUnique(true).
+			SetSparse(true),
+	}
+	if _, err := m.streamCol.Indexes().CreateOne(ctx, pairIdIndex); err != nil {
+		pLog.Error("Error creating pair_id index for streamCol", "error", err)
 		return err
 	}
 	return nil
@@ -346,22 +563,22 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 // of range for Mongo's int32 expireAfterSeconds. The bounds are checked BEFORE
 // narrowing to int32 so a value above math.MaxInt32 cannot wrap to a negative.
 func tokenRetentionSeconds() int32 {
-    val := os.Getenv(CEnvTokenRetention)
-    if val == "" {
-        return CDefTokenRetentionSeconds
-    }
-    parsed, err := strconv.Atoi(val)
-    if err != nil {
-        pLog.Warn("Invalid integer; falling back to default token retention",
-            "env", CEnvTokenRetention, "value", val, "default", CDefTokenRetentionSeconds)
-        return CDefTokenRetentionSeconds
-    }
-    if parsed < 0 || parsed > math.MaxInt32 {
-        pLog.Warn("Value out of range (0..MaxInt32); falling back to default token retention",
-            "env", CEnvTokenRetention, "value", parsed, "max", int(math.MaxInt32), "default", CDefTokenRetentionSeconds)
-        return CDefTokenRetentionSeconds
-    }
-    return int32(parsed)
+	val := os.Getenv(CEnvTokenRetention)
+	if val == "" {
+		return CDefTokenRetentionSeconds
+	}
+	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		pLog.Warn("Invalid integer; falling back to default token retention",
+			"env", CEnvTokenRetention, "value", val, "default", CDefTokenRetentionSeconds)
+		return CDefTokenRetentionSeconds
+	}
+	if parsed < 0 || parsed > math.MaxInt32 {
+		pLog.Warn("Value out of range (0..MaxInt32); falling back to default token retention",
+			"env", CEnvTokenRetention, "value", parsed, "max", int(math.MaxInt32), "default", CDefTokenRetentionSeconds)
+		return CDefTokenRetentionSeconds
+	}
+	return int32(parsed)
 }
 
 // ensureTokenTTLIndex reconciles the token collection's TTL index to the
@@ -373,14 +590,14 @@ func tokenRetentionSeconds() int32 {
 //
 // TTL is Mongo-only; the memory provider intentionally has no equivalent.
 func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int32) error {
-    if m.tokenTTLEnsured {
-        return nil
-    }
-    if err := m.reconcileTokenTTLIndex(ctx, expireAfter); err != nil {
-        return err
-    }
-    m.tokenTTLEnsured = true
-    return nil
+	if m.tokenTTLEnsured {
+		return nil
+	}
+	if err := m.reconcileTokenTTLIndex(ctx, expireAfter); err != nil {
+		return err
+	}
+	m.tokenTTLEnsured = true
+	return nil
 }
 
 // reconcileTokenTTLIndex makes the token collection's TTL index match the
@@ -392,59 +609,59 @@ func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int
 //   - exists, different  -> collMod the index in place (no drop/recreate, so no
 //     collection migration is needed to change retention on a live deployment)
 func (m *MongoProvider) reconcileTokenTTLIndex(ctx context.Context, expireAfter int32) error {
-    if m.tokenCol == nil {
-        return errors.New("token collection not initialized")
-    }
+	if m.tokenCol == nil {
+		return errors.New("token collection not initialized")
+	}
 
-    specs, err := m.tokenCol.Indexes().ListSpecifications(ctx, nil)
-    if err != nil {
-        pLog.Error("Error listing token collection indexes", "error", err)
-        return err
-    }
+	specs, err := m.tokenCol.Indexes().ListSpecifications(ctx, nil)
+	if err != nil {
+		pLog.Error("Error listing token collection indexes", "error", err)
+		return err
+	}
 
-    var existing *int32
-    for _, s := range specs {
-        if s.Name == tokenTTLIndexName {
-            existing = s.ExpireAfterSeconds
-            break
-        }
-    }
+	var existing *int32
+	for _, s := range specs {
+		if s.Name == tokenTTLIndexName {
+			existing = s.ExpireAfterSeconds
+			break
+		}
+	}
 
-    if existing == nil {
-        ttlIndex := mongo.IndexModel{
-            Keys: bson.D{{Key: "exp", Value: 1}},
-            Options: options.Index().
-                SetName(tokenTTLIndexName).
-                SetExpireAfterSeconds(expireAfter),
-        }
-        if _, err = m.tokenCol.Indexes().CreateOne(ctx, ttlIndex); err != nil {
-            pLog.Error("Error creating token TTL index", "error", err)
-            return err
-        }
-        pLog.Info("Created token TTL index", "index", tokenTTLIndexName, "expireAfterSeconds", expireAfter)
-        return nil
-    }
+	if existing == nil {
+		ttlIndex := mongo.IndexModel{
+			Keys: bson.D{{Key: "exp", Value: 1}},
+			Options: options.Index().
+				SetName(tokenTTLIndexName).
+				SetExpireAfterSeconds(expireAfter),
+		}
+		if _, err = m.tokenCol.Indexes().CreateOne(ctx, ttlIndex); err != nil {
+			pLog.Error("Error creating token TTL index", "error", err)
+			return err
+		}
+		pLog.Info("Created token TTL index", "index", tokenTTLIndexName, "expireAfterSeconds", expireAfter)
+		return nil
+	}
 
-    if *existing == expireAfter {
-        return nil
-    }
+	if *existing == expireAfter {
+		return nil
+	}
 
-    // Adjust in place via collMod rather than drop+recreate.
-    cmd := bson.D{
-        {Key: "collMod", Value: CDbTokens},
-        {Key: "index", Value: bson.D{
-            {Key: "name", Value: tokenTTLIndexName},
-            {Key: "expireAfterSeconds", Value: expireAfter},
-        }},
-    }
-    if err = m.ssefDb.RunCommand(ctx, cmd).Err(); err != nil {
-        pLog.Error("Error adjusting token TTL index via collMod",
-            "from", *existing, "to", expireAfter, "error", err)
-        return err
-    }
-    pLog.Info("Adjusted token TTL index expireAfterSeconds",
-        "index", tokenTTLIndexName, "from", *existing, "to", expireAfter)
-    return nil
+	// Adjust in place via collMod rather than drop+recreate.
+	cmd := bson.D{
+		{Key: "collMod", Value: CDbTokens},
+		{Key: "index", Value: bson.D{
+			{Key: "name", Value: tokenTTLIndexName},
+			{Key: "expireAfterSeconds", Value: expireAfter},
+		}},
+	}
+	if err = m.ssefDb.RunCommand(ctx, cmd).Err(); err != nil {
+		pLog.Error("Error adjusting token TTL index via collMod",
+			"from", *existing, "to", expireAfter, "error", err)
+		return err
+	}
+	pLog.Info("Adjusted token TTL index expireAfterSeconds",
+		"index", tokenTTLIndexName, "from", *existing, "to", expireAfter)
+	return nil
 }
 
 func (m *MongoProvider) Check() error {
@@ -454,7 +671,7 @@ func (m *MongoProvider) Check() error {
 	if !dbInit {
 		return errors.New("database not initialized")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), 2*time.Second)
 	defer cancel()
 	return m.CheckWithContext(ctx)
 }
@@ -481,13 +698,12 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	m.dbInit = false
 
 	if initialize {
-		m.pendingCol = nil
 		m.ssefDb = nil
 		m.eventCol = nil
 		m.streamCol = nil
 		m.serverCol = nil
 		m.keyCol = nil
-		m.deliveredCol = nil
+		m.deliveriesCol = nil
 		m.resumeTokens.Reset()
 		err = m.initialize(m.DbName, context.TODO())
 		if err != nil {
@@ -519,18 +735,15 @@ func (m *MongoProvider) connect() error {
 
 	// Disconnect existing client if it exists to prevent leaks
 	if m.mongoClient != nil {
-		_ = m.mongoClient.Disconnect(context.Background())
+		_ = m.mongoClient.Disconnect(m.teardownCtx())
 		m.mongoClient = nil
 	}
 
 	// Overall timeout for the connection attempt, including SPIFFE setup, MongoDB connection, ping, and initialization.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), 60*time.Second)
 	defer cancel()
 
-	opts := options.Client().ApplyURI(m.DbUrl)
-	opts.WriteConcern = &writeconcern.WriteConcern{
-		W: "majority",
-	}
+	opts := mongoClientOptions(m.DbUrl)
 
 	// When SPIFFE mTLS is enabled for MongoDB, obtain the workload's X509-SVID
 	// and use it as the client certificate. This replaces username/password
@@ -574,12 +787,62 @@ func (m *MongoProvider) connect() error {
 		return err
 	}
 
+	m.serverVersion = detectServerVersion(ctx, client)
+	m.eventDAO.SetOneTripIngest(selectIngestMode(m.serverVersion, pLog))
+
 	err = m.initialize(m.DbName, ctx)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// ServerVersion returns the MongoDB server version read at the last
+// successful connect, or "" when it could not be determined.
+func (m *MongoProvider) ServerVersion() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.serverVersion
+}
+
+// detectServerVersion runs buildInfo against the admin database. A failure is
+// not fatal: it returns "" and the caller falls back to the two-write ingest.
+func detectServerVersion(ctx context.Context, client *mongo.Client) string {
+	var info struct {
+		Version string `bson:"version"`
+	}
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}).Decode(&info); err != nil {
+		pLog.Warn("MongoDB: buildInfo failed; server version unknown", "error", err)
+		return ""
+	}
+	pLog.Info("MongoDB: connected", "serverVersion", info.Version)
+	return info.Version
+}
+
+// supportsOneTripIngest reports whether a server of the given version supports
+// the multi-namespace client bulkWrite the one-trip ingest needs (MongoDB 8.0+).
+// An empty or unparsable version is treated as unsupported.
+func supportsOneTripIngest(version string) bool {
+	major, _, _ := strings.Cut(version, ".")
+	n, err := strconv.Atoi(major)
+	return err == nil && n >= 8
+}
+
+// oneTripFallbackWarned makes the below-8.0 fallback WARN fire once per
+// process, not on every reconnect.
+var oneTripFallbackWarned sync.Once
+
+// selectIngestMode picks the ingest write path for version, warning once on
+// log when it has to fall back to the two-write path.
+func selectIngestMode(version string, log *slog.Logger) bool {
+	if supportsOneTripIngest(version) {
+		return true
+	}
+	oneTripFallbackWarned.Do(func() {
+		log.Warn("MongoDB: server older than 8.0 (or version unknown); ingest uses two sequential writes instead of one bulkWrite round trip (ADR 0043)", "serverVersion", version)
+	})
+	return false
 }
 
 func (m *MongoProvider) monitor() {
@@ -642,7 +905,21 @@ func (m *MongoProvider) monitor() {
 	}
 }
 
+// Open constructs a MongoProvider with no lifecycle context. Prefer
+// OpenWithContext from any caller that owns a shutdown signal — Open is the
+// convenience form for tests and one-shot tools.
 func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
+	return OpenWithContext(context.Background(), mongoUrl, dbName)
+}
+
+// OpenWithContext constructs a MongoProvider bound to the server lifecycle ctx
+// (seam S4). Cancelling ctx cancels in-flight connect attempts, health checks,
+// and cluster lease heartbeats; it does not close the provider, so callers
+// still call Close to release the Mongo client.
+func OpenWithContext(ctx context.Context, mongoUrl string, dbName string) (*MongoProvider, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	defaultIssuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", CEnvIssuer)
 	if defaultIssuer == "" {
 		if baseURL := os.Getenv(CEnvBaseURL); baseURL != "" {
@@ -678,6 +955,7 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		TokenIssuer:   tknIssuer,
 		resumeTokens:  resumeToken,
 		stopMonitor:   make(chan struct{}),
+		ctx:           ctx,
 	}
 
 	// Construct services with nil-collection DAOs so callers reaching the
@@ -725,7 +1003,7 @@ func (m *MongoProvider) Close() error {
 		m.x509Source = nil
 	}
 	if m.mongoClient != nil {
-		err := m.mongoClient.Disconnect(context.Background())
+		err := m.mongoClient.Disconnect(m.teardownCtx())
 		m.mongoClient = nil
 		m.dbInit = false
 		return err
@@ -735,30 +1013,38 @@ func (m *MongoProvider) Close() error {
 
 // Cluster pass-throughs retained for the lease/cluster integration tests
 // under mongo_provider/test/. Production callers use Persistence.Coordinator.
-func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
-    return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
+func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
+	return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 
 func (m *MongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
-    return m.coordinator.ReleaseLeaseIfOwned(resource, nodeId)
+	return m.coordinator.ReleaseLeaseIfOwned(resource, nodeId)
 }
 
 func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
-    return m.coordinator.RegisterNode(node)
+	return m.coordinator.RegisterNode(node)
 }
 
 func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
-    return m.coordinator.GetActiveNodeCount()
+	return m.coordinator.GetActiveNodeCount()
 }
 
 func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
-    return m.coordinator.GetActiveNodes()
+	return m.coordinator.GetActiveNodes()
 }
 
 func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
-    return m.coordinator.GetLeaseOwner(resource)
+	return m.coordinator.GetLeaseOwner(resource)
 }
 
 func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
-    return m.coordinator.GetNode(nodeId)
+	return m.coordinator.GetNode(nodeId)
+}
+
+func (m *MongoProvider) LastPingPurge() (time.Time, error) {
+	return m.coordinator.LastPingPurge()
+}
+
+func (m *MongoProvider) RecordPingPurge(at time.Time, fencingToken int64) (bool, error) {
+	return m.coordinator.RecordPingPurge(at, fencingToken)
 }
