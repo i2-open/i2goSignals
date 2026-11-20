@@ -37,6 +37,7 @@
 /.sandcastle/plan-prompt.md
 /.idea/go.imports.xml
 /.idea/vcs.xml
+/.idea/
 __debug_bin*
 /graphify-out/
 # Ephemeral go.work written by `make seams`; the git-tag pin is the single
