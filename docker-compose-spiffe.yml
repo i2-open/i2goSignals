@@ -398,7 +398,7 @@ services:
   # goSignals nodes — SPIFFE-enabled
   # ---------------------------------------------------------------------------
   goSignals1:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: gosignals1
     hostname: goSignals1
     command: /app/goSignalsServer
@@ -419,6 +419,7 @@ services:
       - 1.1.1.1
     volumes:
       - spire_sockets:/run/spire/sockets  # SPIRE agent socket
+      - "./config/certs:/app/config/certs:ro"
     env_file:
       - ./config/goSignals1-spiffe.env
     environment:
@@ -435,7 +436,7 @@ services:
       com.i2gosignals.role: gosignals-node
 
   goSignals2:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: gosignals2
     hostname: goSignals2
     command: /app/goSignalsServer
@@ -456,6 +457,7 @@ services:
       - 1.1.1.1
     volumes:
       - spire_sockets:/run/spire/sockets
+      - "./config/certs:/app/config/certs:ro"
     env_file:
       - ./config/goSignals2-spiffe.env
     environment:
@@ -471,7 +473,7 @@ services:
       com.i2gosignals.role: gosignals-node
 
   goSsfServer:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: gossfserver
     hostname: goSsfServer
     command: /app/goSsfServer
@@ -497,6 +499,7 @@ services:
       - 1.1.1.1
     volumes:
       - spire_sockets:/run/spire/sockets
+      - "./config/certs:/app/config/certs:ro"
     env_file:
       - ./config/goSsf1-spiffe.env
     environment:
@@ -564,7 +567,7 @@ services:
 
 # cluster-monitor checks the health of spire and mongo cluster and reports any issues
   cluster-monitor:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: cluster-monitor
     depends_on:
       mongo1:
@@ -591,7 +594,7 @@ services:
   # ---------------------------------------------------------------------------
 
   scimSsfSetup:
-    image: i2gosignals:latest
+    image: independentid/i2gosignals:0.12.0
     container_name: scim-ssf-setup
     depends_on:
       mongo1:
@@ -603,7 +606,6 @@ services:
       spire-agent:
         condition: service_healthy
     volumes:
-      - ./:/app
       - "./config/scim:/scim"
       - "./config/certs:/scim/certs"
       - spire_sockets:/run/spire/sockets
@@ -620,7 +622,7 @@ services:
       # coexists with transport-layer SPIFFE mTLS above. Presented on
       # `create key` / `create iat`; must match the goSignals nodes.
       - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
-    entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
+    entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.10.7

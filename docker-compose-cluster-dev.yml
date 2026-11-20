@@ -265,7 +265,7 @@ services:
     command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
 
   scimSsfSetup:
-    image: i2gosignals:v0.8
+    image: independentid/i2gosignals:0.12.0
     depends_on:
       mongo1:
         condition: service_healthy
