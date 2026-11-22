@@ -1,4 +1,4 @@
-<picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo/gosignals-hero-primary.svg"><img src="brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+<img src="docs/images/GoSignals-Gopher-512.png" alt="goSignals" height="100">
 
 # goSignals
 
