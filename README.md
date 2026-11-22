@@ -1,4 +1,4 @@
-<img src="docs/images/GoSignals-Gopher-512.png" alt="goSignals" height="96">
+<img src="docs/images/GoSignals-Gopher-512.png" alt="goSignals" height="100">
 
 # goSignals
 
