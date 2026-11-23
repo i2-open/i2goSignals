@@ -30,7 +30,7 @@ The IETF and the OpenID Foundation have been assembling consensus around the sta
 [RFC 8417](https://www.rfc-editor.org/rfc/rfc8417) defines the **Security Event Token (SET)**: a JWT-based data structure that conveys a statement of fact, from an issuer, about a security subject — that something happened to or about that subject. A SET is not a command. It is a signed claim that an event occurred, which the receiver is free to act on, or not, according to its own policy. Every other spec in this stack rides on top of SETs.
 
 **2. How do SETs get from a transmitter to a receiver?**
-[RFC 8935](https://www.rfc-editor.org/rfc/rfc8935) defines **push-based delivery** over HTTP, in which the transmitter POSTs each SET to a receiver endpoint. [RFC 8936](https://www.rfc-editor.org/rfc/rfc8936) defines **poll-based delivery**, in which the receiver fetches batches of pending SETs from the transmitter. Push fits receivers that can host endpoints; poll fits receivers behind a firewall or in environments where outbound is the only reliable direction. goSignals also implements a third, bidirectional method — **SSTP** ([draft-hunt-secevent-sstp-00](docs/specs/draft-hunt-secevent-sstp-00.txt)), the Synchronous SET Transfer Protocol — which carries SETs in *both* directions over a single HTTP cycle for peers that want a symmetric, firewall-friendly exchange. See [docs/SSTP.md](docs/SSTP.md).
+[RFC 8935](https://www.rfc-editor.org/rfc/rfc8935) defines **push-based delivery** over HTTP, in which the transmitter POSTs each SET to a receiver endpoint. [RFC 8936](https://www.rfc-editor.org/rfc/rfc8936) defines **poll-based delivery**, in which the receiver fetches batches of pending SETs from the transmitter. Push fits receivers that can host endpoints; poll fits receivers behind a firewall or in environments where outbound is the only reliable direction. Push and poll each move SETs in one direction. goSignals also implements a bi-directional delivery method — **SSTP** ([draft-hunt-secevent-sstp-00](docs/specs/draft-hunt-secevent-sstp-00.txt)), the Synchronous SET Transfer Protocol — which carries SETs and acknowledgements in *both* directions over a single HTTP cycle, so a pair of peers can replace a push stream plus a poll stream with one symmetric, firewall-friendly exchange. See [docs/SSTP.md](docs/SSTP.md).
 
 **3. How do transmitters and receivers find each other, agree on what they share, and manage the relationship over time?**
 The OpenID Foundation's [Shared Signals Framework (SSF)](https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html) defines that layer — configuration discovery, stream lifecycle management, subject identifiers, and verification flows. SSF turns a bespoke integration into a managed stream.
@@ -78,6 +78,30 @@ _A quick reference for the specifications i2goSignals implements and interoperat
 ## Project Status
 The i2goSignals project is currently under active development. This preview code is intended for feedback and community involvement and is **not yet ready for production**. Key features like administration API security and multi-node coordination are being finalized.
 
+## Releases
+
+The current release is **[v0.12.0](docs/releases/v0.12.0.md)** (2026-11-20). Release notes for every
+version are in [`docs/releases/`](docs/releases/); tagged builds are on
+[GitHub Releases](https://github.com/i2-open/i2goSignals/releases), and container images are
+published to Docker Hub as [`independentid/i2gosignals`](https://hub.docker.com/r/independentid/i2gosignals).
+
+### Release summary: v0.12.0
+
+v0.12.0 is the first full release since v0.11.1 and consolidates `v0.12.0-alpha.1` through
+`v0.12.0-alpha.22`. Highlights:
+
+- **SSTP: new bi-directional SET delivery** — push (RFC 8935) and poll (RFC 8936) each move SETs one way; with SSTP a pair of servers exchanges SETs and acknowledgements in *both* directions over one authenticated HTTP channel. See [docs/SSTP.md](docs/SSTP.md).
+- **OpenID SSF 1.0 final conformance** as both transmitter and receiver; the conformance harness ships under `conformance/`.
+- **Unsigned and unauthenticated SETs are rejected** — signature algorithms are allow-listed (`RS256`, `ES256`, `ML-DSA-65`), every business stream needs a trust anchor, and outbound dials must be `https` unless a stream opts out.
+- **Delivery rebuilt for throughput and clusters** — one `deliveries` collection, idempotent ingest keyed on `jti`, any cluster node answers poll and SSTP requests, and push/poll/SSTP run concurrently per stream.
+- **Signing-key lifecycle** — keys are created explicitly, expire (180 days by default), can be suspended or revoked, and default to ES256 (RS256 and post-quantum ML-DSA-65 are also supported).
+- **SPIFFE/SPIRE** — workload identity and mTLS (supported since v0.9.3) now share one pooled `X509Source` per server instead of opening a SPIRE agent connection per call.
+- **Toolchain** — Go 1.27.4 and MongoDB 8.0.
+
+> **Not a drop-in upgrade.** The store is migrated one way on first start, and signing-key and TLS
+> defaults change. Read the [v0.12.0 upgrade notes](docs/releases/v0.12.0.md#upgrade) before starting
+> v0.12.0 against an existing store.
+
 ## Capabilities
 - **Protocol Interoperability**: Acts as a protocol converter, allowing Poll-only receivers to pick up events from Push-only transmitters.
 - **Advanced Routing**: Controls how events are validated, filtered, and re-published to one or more outbound streams based on issuer and audience.
@@ -91,9 +115,9 @@ The i2goSignals project is currently under active development. This preview code
 ## Getting Started
 
 ### Prerequisites
-* [Go 1.25+](https://go.dev)
-* [Docker Desktop](https://www.docker.com/products/docker-desktop) for local testing and development
-* [MongoDB](https://www.mongodb.com/) (provided in Docker Compose setups)
+* [Go 1.27.4+](https://go.dev) to build from source. The code uses Go 1.27 standard-library packages (`uuid`, `crypto/mldsa`, `encoding/json/v2`), so an older toolchain cannot build it (or let Go download the toolchain automatically).
+* [Docker Desktop](https://www.docker.com/products/docker-desktop) (or Docker Engine with the Compose v2 and buildx plugins) for the demo stacks and image builds
+* [MongoDB 8.0](https://www.mongodb.com/) (`mongo:8.0.13` is provided in the Docker Compose setups). Ingest uses the 8.0 multi-collection `bulkWrite` and falls back on older servers.
 
 ### Installation
 ```bash
@@ -113,6 +137,7 @@ docker exec spire-server sh /etc/spire/registration/register.sh
 ```
 
 ## Documentation
+* [Release Notes](docs/releases/) - Per-version changes and upgrade steps; start with [v0.12.0](docs/releases/v0.12.0.md).
 * [GoSignals Administration Tool](docs/gosignals_tool.md) - CLI usage and commands.
 * [CLI Login &amp; Bootstrap Guide](docs/cli_login.md) - Delegated-OAuth `login` (browser PKCE / device-code), unattended `I2SIG_BOOTSTRAP_TOKEN` bootstrap, and the docker-compose variant matrix.
 * [Configuration Properties](docs/configuration_properties.md) - Environment variables and settings.
@@ -135,23 +160,23 @@ There are several Docker Compose configurations for various use cases and demons
 | `docker-compose-spiffe.yml` | **SPIFFE Demo** | Adds SPIRE for workload identity and mTLS between nodes and MongoDB. |
 | `docker-compose-cluster.yml` | **Clustered Demo** | Adds Nginx load balancer and redundant nodes for high-availability testing. |
 
-**Note**: The `-dev` variants use `Dockerfile-dev` and mount the source code for live changes.
+**Note**: The demo stacks (`docker-compose.yml`, `docker-compose-cluster.yml`, `docker-compose-spiffe.yml`) run the published image `independentid/i2gosignals:0.12.0` — nothing is built locally. The `-dev` variants use `Dockerfile-dev`, build from source, and mount the source code for live changes.
 
 ### Demonstration Walk-through
 
 The `docker-compose.yml` file provides a sample environment demonstrating Push and Poll scenarios between two i2goSignals servers, along with `i2scim.io` servers for multi-master replication.
 
-1. **Build the project**: `make build`
+1. **Generate certificates**: `make generate-certs` (optional — `make run` generates them when missing). The demo runs the published image, so no build is needed; run `make build` only if you want the `goSignals` CLI locally (built into `bin/`).
 2. **Configure local DNS**: Add `goSignals1`, `goSignals2`, and `keycloak` to your `/etc/hosts` pointing to `127.0.0.1`. The `keycloak` entry is required so that browser-side SSO redirects (e.g. Grafana logging in via Keycloak) resolve to the local stack.
 3. **Trust the dev CA**: The stack serves TLS with a self-signed CA. Import `config/certs/ca-cert.pem` into your browser or OS trust store so that `https://localhost:3000` (Grafana) and `https://keycloak:9080` are accepted without certificate warnings.
    - macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain config/certs/ca-cert.pem`
    - Linux: copy to `/usr/local/share/ca-certificates/` and run `sudo update-ca-certificates`
    - Firefox keeps its own store — import the CA under Settings → Privacy & Security → Certificates.
-4. **Start services**: `docker compose up -d`
+4. **Start services**: `make run` (checks the certificates, then runs `docker compose -f docker-compose.yml up -d`)
 5. **Automated Configuration**: The `scimSsfSetup` service automatically configures the streams. To perform manual configuration or explore the tool:
    ```bash
-   ./goSignals
-   goSignals> add server gs1 http://goSignals1:8888
+   bin/goSignals
+   goSignals> add server gs1 https://goSignals1:8888
    ```
 
 ### Grafana SSO
@@ -201,11 +226,10 @@ family publisher passes to `make build-publish`, and the OCI
 | `make cross-compile-linux` | Stages per-arch Go binaries under `bin/linux/<arch>/` (used as a dependency by the docker targets). |
 
 Override the binary version for a one-off local image without editing
-`version.txt`, or push a multi-arch image (`:<tag>` and `:latest`) by hand to your own registry:
+`version.txt`:
 
 ```bash
 make build-docker VERSION=1.2.3-rc1
-make build-publish PUSH=1 REGISTRY=docker.io NAMESPACE=independentid TAG=v1.2.3
 ```
 
 ---
